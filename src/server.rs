@@ -1,15 +1,23 @@
-include!("service.rs");
-
 use argparse::ArgumentParser;
 use proto::raptor_boost_server::{RaptorBoost, RaptorBoostServer};
 use rusqlite::{Connection, Result};
 use sha2::{Digest, Sha256};
-use tonic::{Request, Response, Status, transport::Server};
+use tonic::transport::Server;
+
+mod proto {
+    tonic::include_proto!("raptorboost");
+}
+
+mod controller;
+mod service;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bind_addr = "[::1]:7272".parse().unwrap();
-    let rb_service = RaptorBoostService::default();
+    let controller = controller::RaptorBoostController {};
+    let rb_service = service::RaptorBoostService {
+        controller: Box::new(controller),
+    };
 
     {
         let mut ap = ArgumentParser::new();

@@ -1,19 +1,23 @@
-pub mod proto {
+mod proto {
     tonic::include_proto!("raptorboost");
 }
 
-use proto::{GetVersionRequest, GetVersionResponse};
+use crate::controller;
+use crate::proto::raptor_boost_server::RaptorBoost;
+use crate::proto::{GetVersionRequest, GetVersionResponse};
+use tonic::{Request, Response, Status};
 
-#[derive(Debug, Default)]
-pub struct RaptorBoostService {}
+pub struct RaptorBoostService {
+    pub controller: Box<controller::RaptorBoostController>,
+}
 
 #[tonic::async_trait]
 impl RaptorBoost for RaptorBoostService {
     async fn get_version(
         &self,
-        _: Request<GetVersionRequest>,
+        _: tonic::Request<GetVersionRequest>,
     ) -> Result<Response<GetVersionResponse>, Status> {
-        Ok(Response::new(proto::GetVersionResponse {
+        Ok(Response::new(GetVersionResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
         }))
     }
