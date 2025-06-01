@@ -1,35 +1,41 @@
-use argparse::ArgumentParser;
-use proto::raptor_boost_server::{RaptorBoost, RaptorBoostServer};
-use rusqlite::{Connection, Result};
-use sha2::{Digest, Sha256};
-use tonic::transport::Server;
-
 mod proto {
     tonic::include_proto!("raptorboost");
 }
 
 mod controller;
+mod db;
 mod service;
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use clap::Parser;
+use proto::raptor_boost_server::RaptorBoostServer;
+use rusqlite::Result;
+use tonic::transport::Server;
+
+#[derive(Parser)]
+#[command(version, about)]
+struct Args {
+    #[arg(short, long, default_value = "[::1]:7272")]
+    bind_addr: SocketAddr,
+    #[arg(short, long, default_value = std::env::current_dir().unwrap().into_os_string())]
+    out_dir: PathBuf,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut bind_addr = "[::1]:7272".parse().unwrap();
-    let controller = controller::RaptorBoostController {};
-    let rb_service = service::RaptorBoostService {
-        controller: Box::new(controller),
-    };
+    let args = Args::parse();
 
-    {
-        let mut ap = ArgumentParser::new();
-        ap.refer(&mut bind_addr)
-            .add_option(&["-h", "--host"], argparse::Store, "Bind host addr");
+    // let bind_addr = args.bind_addr.parse().unwrap();
 
-        ap.parse_args_or_exit();
-    }
+    println!("{}", args.out_dir.display());
+    let controller = controller::RaptorBoostController::new(&args.out_dir)?;
+    let rb_service = service::RaptorBoostService { controller };
 
     Server::builder()
         .add_service(RaptorBoostServer::new(rb_service))
-        .serve(bind_addr)
+        .serve(args.bind_addr)
         .await?;
 
     Ok(())

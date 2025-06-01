@@ -1,5 +1,3 @@
-include!("service.rs");
-
 use std::env;
 
 use proto::raptor_boost_server::{RaptorBoost, RaptorBoostServer};

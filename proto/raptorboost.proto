@@ -3,10 +3,41 @@ package raptorboost;
 
 service RaptorBoost {
   rpc GetVersion (GetVersionRequest) returns (GetVersionResponse);
+  rpc UploadFile (UploadFileRequest) returns (UploadFileResponse);
+  rpc SendFileData (stream FileData) returns (SendFileDataResponse);
 }
 
 message GetVersionRequest {}
 
 message GetVersionResponse {
   string version = 1;
+}
+
+message UploadFileRequest {
+  string sha256sum = 1;
+  uint64 size = 2;
+}
+
+enum FileState {
+  FILESTATE_UNSPECIFIED = 0;
+  FILESTATE_NEED_MORE_DATA = 1;
+  FILESTATE_COMPLETE = 2;
+}
+message UploadFileResponse {
+  FileState file_state = 1;
+  optional uint64 offset = 2;
+}
+
+message FileData {
+  string sha256sum = 1;
+  bytes data = 2;
+}
+
+enum SendFileDataStatus {
+  SENDFILEDATASTATUS_UNSPECIFIED = 0;
+  SENDFILEDATASTATUS_COMPLETE = 1;
+  SENDFILEDATASTATUS_ERROR_CHECKSUM = 2;
+}
+message SendFileDataResponse {
+  SendFileDataStatus status = 1;
 }

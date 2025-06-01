@@ -26,7 +26,9 @@ prost = "0.13.5"
 # is why it is not a default feature -- it could become hard to disable.
 rusqlite = { version = "0.36.0", features = ["bundled"] }
 sha2 = "0.10.9"
-argparse = "0.2.2"
+clap = { version = "4.5.39", features = ["derive", "string"] }
+tokio-stream = "0.1.17"
+thiserror = "2.0.12"
 
 [build-dependencies]
 tonic-build = "*"
