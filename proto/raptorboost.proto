@@ -1,0 +1,12 @@
+syntax = "proto3";
+package raptorboost;
+
+service RaptorBoost {
+  rpc GetVersion (GetVersionRequest) returns (GetVersionResponse);
+}
+
+message GetVersionRequest {}
+
+message GetVersionResponse {
+  string version = 1;
+}
