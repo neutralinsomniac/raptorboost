@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{self, Seek, Write};
 
 use crate::controller::{self, RaptorBoostError};
@@ -82,7 +82,10 @@ impl RaptorBoost for RaptorBoostService {
         let mut partial_path = self.controller.get_partial_dir();
         partial_path.push(&sha256sum);
 
-        let mut f = File::open(&partial_path)?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&partial_path)?;
 
         // jump to end
         f.seek(io::SeekFrom::End(0))?;
@@ -100,11 +103,9 @@ impl RaptorBoost for RaptorBoostService {
             let total = data.data.len();
             let mut num_written = 0;
             while num_written < total {
-                num_written += f.write(&first_file_data.data)?;
+                num_written += f.write(&data.data)?;
             }
         }
-
-        drop(f);
 
         let mut complete_path = self.controller.get_complete_dir();
         complete_path.push(&sha256sum);

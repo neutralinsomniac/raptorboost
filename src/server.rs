@@ -3,7 +3,6 @@ mod proto {
 }
 
 mod controller;
-mod db;
 mod service;
 
 use std::net::SocketAddr;
