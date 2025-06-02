@@ -29,7 +29,7 @@ message UploadFileResponse {
 }
 
 message FileData {
-  string sha256sum = 1;
+  optional string sha256sum = 1;
   bytes data = 2;
 }
 

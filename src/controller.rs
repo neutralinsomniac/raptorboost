@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    fs::File,
+    fs::{self, File},
     io::{Seek, SeekFrom},
     path::PathBuf,
 };
@@ -38,18 +38,39 @@ impl RaptorBoostController {
             )));
         }
 
+        // ensure directories exist
         let mut partial_dir = base_dir.to_owned();
         partial_dir.push("partial");
+
+        if !partial_dir.exists() {
+            match fs::create_dir(&partial_dir) {
+                Ok(_) => (),
+                Err(e) => return Err(Box::new(e)),
+            }
+        }
 
         let mut complete_dir = base_dir.to_owned();
         complete_dir.push("complete");
 
-        // ensure directories exist
+        if !complete_dir.exists() {
+            match fs::create_dir(&complete_dir) {
+                Ok(_) => (),
+                Err(e) => return Err(Box::new(e)),
+            }
+        }
 
         Ok(RaptorBoostController {
             partial_dir,
             complete_dir,
         })
+    }
+
+    pub fn get_partial_dir(&self) -> PathBuf {
+        return self.partial_dir.to_owned();
+    }
+
+    pub fn get_complete_dir(&self) -> PathBuf {
+        return self.complete_dir.to_owned();
     }
 
     pub fn get_version(&self) -> String {
@@ -58,13 +79,8 @@ impl RaptorBoostController {
 
     pub fn check_file(&self, sha256sum: &str) -> Result<CheckFileResult, RaptorBoostError> {
         // first look for file in complete
-        let mut full_complete_file = self.complete_dir.to_owned();
+        let mut full_complete_file = self.get_complete_dir();
         full_complete_file.push(sha256sum);
-
-        // ensure no path shenanigans
-        let Ok(full_complete_file) = full_complete_file.canonicalize() else {
-            return Err(RaptorBoostError::PathSanitization);
-        };
 
         match full_complete_file.parent() {
             Some(p) => {
@@ -81,17 +97,12 @@ impl RaptorBoostController {
             return Ok(CheckFileResult::FileComplete);
         }
 
-        let mut full_partial_file = self.partial_dir.to_owned();
+        let mut full_partial_file = self.get_partial_dir();
         full_partial_file.push(sha256sum);
-
-        // ensure no path shenanigans
-        let Ok(full_partial_file) = full_partial_file.canonicalize() else {
-            return Err(RaptorBoostError::PathSanitization);
-        };
 
         match full_partial_file.parent() {
             Some(p) => {
-                if p != self.complete_dir {
+                if p != self.partial_dir {
                     return Err(RaptorBoostError::PathSanitization);
                 }
             }
@@ -111,7 +122,7 @@ impl RaptorBoostController {
                 Err(e) => return Err(RaptorBoostError::OtherError(e.to_string())),
             };
 
-            return Ok(CheckFileResult::FilePartialOffset(offset + 1));
+            return Ok(CheckFileResult::FilePartialOffset(offset));
         }
 
         return Ok(CheckFileResult::FilePartialOffset(0));

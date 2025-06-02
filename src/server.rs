@@ -11,7 +11,6 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use proto::raptor_boost_server::RaptorBoostServer;
-use rusqlite::Result;
 use tonic::transport::Server;
 
 #[derive(Parser)]
@@ -27,9 +26,6 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // let bind_addr = args.bind_addr.parse().unwrap();
-
-    println!("{}", args.out_dir.display());
     let controller = controller::RaptorBoostController::new(&args.out_dir)?;
     let rb_service = service::RaptorBoostService { controller };
 
