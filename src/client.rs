@@ -11,7 +11,6 @@ use ring;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::io::{BufReader, Seek, SeekFrom, Write};
-use std::path::PathBuf;
 use std::time;
 use tokio::runtime::Runtime;
 use tonic::Request;
@@ -54,23 +53,21 @@ impl<R: Read> IterChunks for R {
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
-    file: PathBuf,
+    #[arg(trailing_var_arg = true)]
+    file: Vec<String>,
     #[arg(long)]
     host: String,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn send_file(host: String, filename: String) -> Result<(), Box<dyn std::error::Error>> {
     let rt = Runtime::new()?;
-
     let mut buffer = [0; 8192];
 
-    let args = Args::parse();
-
-    let mut f = File::open(&args.file)?;
+    let mut f = File::open(&filename)?;
     let file_size = f.metadata()?.len();
     let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
 
-    println!("calculating checksum...");
+    println!("calculating checksum for {}...", filename);
     loop {
         match f.read(&mut buffer) {
             Ok(0) => break,
@@ -85,14 +82,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sha256sum: String = hex::encode(hasher.finish());
 
     rt.block_on(async {
-        let mut client =
-            match RaptorBoostClient::connect(format!("http://{}:7272", args.host)).await {
-                Ok(c) => c,
-                Err(e) => {
-                    println!("error connecting: {}", e);
-                    return;
-                }
-            };
+        let mut client = match RaptorBoostClient::connect(format!("http://{}:7272", host)).await {
+            Ok(c) => c,
+            Err(e) => {
+                println!("error connecting: {}", e);
+                return;
+            }
+        };
         let upload_file_resp = match client
             .upload_file(Request::new(UploadFileRequest {
                 sha256sum: sha256sum.to_owned(),
@@ -120,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        let mut f = File::open(&args.file).unwrap();
+        let mut f = File::open(&filename).unwrap();
         match f.seek(SeekFrom::Start(offset)) {
             Ok(_) => (),
             Err(e) => {
@@ -130,9 +126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if offset == 0 {
-            println!("sending new file...");
+            println!("sending {}...", filename);
         } else {
-            println!("resuming transfer from {:.2}MB", offset / 1024 / 1024);
+            println!("resuming {} from {:.2}MB", filename, offset / 1024 / 1024);
         }
 
         let mut first = true;
@@ -199,6 +195,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => println!("\rerror streaming: {}", e),
         };
     });
+
+    Ok(())
+}
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    for f in &args.file {
+        match send_file(args.host.to_string(), f.to_string()) {
+            Ok(_) => (),
+            Err(e) => println!("error sending {}: {}", f, e),
+        }
+    }
 
     Ok(())
 }
