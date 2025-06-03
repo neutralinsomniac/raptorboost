@@ -2,7 +2,7 @@ use std::{
     error::Error,
     fs::{self, File},
     io::{Seek, SeekFrom},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use thiserror::Error;
@@ -30,33 +30,25 @@ pub enum CheckFileResult {
 }
 
 impl RaptorBoostController {
-    pub fn new(base_dir: &PathBuf) -> Result<RaptorBoostController, Box<dyn Error>> {
+    pub fn new(output_dir: &PathBuf) -> Result<RaptorBoostController, Box<dyn Error>> {
         // base dir must exist
-        if !base_dir.try_exists()? {
+        if !output_dir.try_exists()? {
             return Err(Box::new(RaptorBoostControllerError(
-                "base directory doesn't exist".to_string(),
+                "output directory doesn't exist".to_string(),
             )));
         }
 
         // ensure directories exist
-        let mut partial_dir = base_dir.to_owned();
-        partial_dir.push("partial");
+        let partial_dir = output_dir.as_path().join("partial");
 
         if !partial_dir.exists() {
-            match fs::create_dir(&partial_dir) {
-                Ok(_) => (),
-                Err(e) => return Err(Box::new(e)),
-            }
+            fs::create_dir(&partial_dir)?;
         }
 
-        let mut complete_dir = base_dir.to_owned();
-        complete_dir.push("complete");
+        let complete_dir = output_dir.as_path().join("complete");
 
         if !complete_dir.exists() {
-            match fs::create_dir(&complete_dir) {
-                Ok(_) => (),
-                Err(e) => return Err(Box::new(e)),
-            }
+            fs::create_dir(&complete_dir)?;
         }
 
         Ok(RaptorBoostController {
@@ -65,12 +57,12 @@ impl RaptorBoostController {
         })
     }
 
-    pub fn get_partial_dir(&self) -> PathBuf {
-        return self.partial_dir.to_owned();
+    pub fn get_partial_dir(&self) -> &Path {
+        self.partial_dir.as_path()
     }
 
-    pub fn get_complete_dir(&self) -> PathBuf {
-        return self.complete_dir.to_owned();
+    pub fn get_complete_dir(&self) -> &Path {
+        return self.complete_dir.as_path();
     }
 
     pub fn get_version(&self) -> String {
@@ -79,8 +71,7 @@ impl RaptorBoostController {
 
     pub fn check_file(&self, sha256sum: &str) -> Result<CheckFileResult, RaptorBoostError> {
         // first look for file in complete
-        let mut full_complete_file = self.get_complete_dir();
-        full_complete_file.push(sha256sum);
+        let full_complete_file = self.get_complete_dir().join(&sha256sum);
 
         match full_complete_file.parent() {
             Some(p) => {
@@ -97,8 +88,7 @@ impl RaptorBoostController {
             return Ok(CheckFileResult::FileComplete);
         }
 
-        let mut full_partial_file = self.get_partial_dir();
-        full_partial_file.push(sha256sum);
+        let full_partial_file = self.get_partial_dir().join(&sha256sum);
 
         match full_partial_file.parent() {
             Some(p) => {

@@ -79,9 +79,7 @@ impl RaptorBoost for RaptorBoostService {
         }
 
         // start writing partial file
-        let mut partial_path = self.controller.get_partial_dir();
-        partial_path.push(&sha256sum);
-
+        let partial_path = self.controller.get_partial_dir().join(&sha256sum);
         let mut f = OpenOptions::new()
             .create(true)
             .read(true)
@@ -137,8 +135,7 @@ impl RaptorBoost for RaptorBoostService {
             return Ok(Response::new(resp));
         }
 
-        let mut complete_path = self.controller.get_complete_dir();
-        complete_path.push(&sha256sum);
+        let complete_path = self.controller.get_complete_dir().join(&sha256sum);
 
         std::fs::rename(partial_path, complete_path)?;
 
