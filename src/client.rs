@@ -151,7 +151,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     0 => 0,
                     _ => ((pos - pos_old) as u128 / time_passed) / 1000,
                 };
-                print!("\r{}% [{}MB/s]", percent_cur, mbps);
+                print!(
+                    "\r{}% [{}MB/s]",
+                    percent_cur,
+                    if mbps == 0 {
+                        "--".to_string()
+                    } else {
+                        mbps.to_string()
+                    }
+                );
                 io::stdout().flush().unwrap();
                 percent_old = percent_cur;
                 time_old = time_now;
