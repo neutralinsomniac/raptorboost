@@ -1,5 +1,5 @@
-use std::fs::OpenOptions;
-use std::io::{self, Seek, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{self, ErrorKind, Read, Seek, Write};
 
 use crate::controller::{self, RaptorBoostError};
 use crate::proto::raptor_boost_server::RaptorBoost;
@@ -84,8 +84,24 @@ impl RaptorBoost for RaptorBoostService {
 
         let mut f = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&partial_path)?;
+
+        // calculate initial checksum
+        f.seek(io::SeekFrom::Start(0))?;
+        let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+        let mut buffer = [0; 8192];
+        loop {
+            match f.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    hasher.update(&buffer[..n]);
+                }
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => Err(e)?,
+            }
+        }
 
         // jump to end
         f.seek(io::SeekFrom::End(0))?;
@@ -97,6 +113,7 @@ impl RaptorBoost for RaptorBoostService {
         while num_written < total {
             num_written += f.write(&first_file_data.data)?;
         }
+        hasher.update(&first_file_data.data);
 
         // now loop over remaining message stream
         while let Some(data) = stream.message().await? {
@@ -105,6 +122,19 @@ impl RaptorBoost for RaptorBoostService {
             while num_written < total {
                 num_written += f.write(&data.data)?;
             }
+            hasher.update(&data.data);
+        }
+
+        let calc_sha256sum: String = hex::encode(hasher.finish());
+
+        let mut resp = SendFileDataResponse::default();
+        if calc_sha256sum != sha256sum {
+            match fs::remove_file(&partial_path) {
+                Ok(_) => (),
+                Err(e) => println!("warning: couldn't remove {}: {}", partial_path.display(), e),
+            }
+            resp.status = SendFileDataStatus::SendfiledatastatusErrorChecksum.into();
+            return Ok(Response::new(resp));
         }
 
         let mut complete_path = self.controller.get_complete_dir();
@@ -112,7 +142,6 @@ impl RaptorBoost for RaptorBoostService {
 
         std::fs::rename(partial_path, complete_path)?;
 
-        let mut resp = SendFileDataResponse::default();
         resp.status = SendFileDataStatus::SendfiledatastatusComplete.into();
 
         Ok(Response::new(resp))
