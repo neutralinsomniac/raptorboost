@@ -1,7 +1,9 @@
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
+use std::fs::{self};
 use std::io::{self, ErrorKind, Read, Seek, Write};
 
 use crate::controller::{self, RaptorBoostError};
+use crate::lock::LockFile;
 use crate::proto::raptor_boost_server::RaptorBoost;
 use crate::proto::{
     FileData, FileState, GetVersionRequest, GetVersionResponse, SendFileDataResponse,
@@ -77,6 +79,16 @@ impl RaptorBoost for RaptorBoostService {
             }
             controller::CheckFileResult::FilePartialOffset(_) => (),
         }
+
+        // lock partial
+        let partial_lock_path = self.controller.get_lock_dir().join(&sha256sum);
+        let _partial_lock = match LockFile::open(partial_lock_path.to_owned()) {
+            Ok(l) => l,
+            Err(e) => {
+                println!("error locking {}: {}", partial_lock_path.display(), e);
+                return Err(Status::unavailable("couldn't lock!"));
+            }
+        };
 
         // start writing partial file
         let partial_path = self.controller.get_partial_dir().join(&sha256sum);

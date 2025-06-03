@@ -1,3 +1,5 @@
+mod lock;
+
 mod proto {
     tonic::include_proto!("raptorboost");
 }

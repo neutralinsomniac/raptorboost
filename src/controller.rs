@@ -22,6 +22,7 @@ pub struct RaptorBoostControllerError(String);
 pub struct RaptorBoostController {
     partial_dir: PathBuf,
     complete_dir: PathBuf,
+    lock_dir: PathBuf,
 }
 
 pub enum CheckFileResult {
@@ -51,9 +52,18 @@ impl RaptorBoostController {
             fs::create_dir(&complete_dir)?;
         }
 
+        let lock_dir = output_dir.as_path().join("lock");
+
+        if lock_dir.exists() {
+            fs::remove_dir_all(&lock_dir)?;
+        }
+
+        fs::create_dir(&lock_dir)?;
+
         Ok(RaptorBoostController {
             partial_dir,
             complete_dir,
+            lock_dir,
         })
     }
 
@@ -63,6 +73,10 @@ impl RaptorBoostController {
 
     pub fn get_complete_dir(&self) -> &Path {
         return self.complete_dir.as_path();
+    }
+
+    pub fn get_lock_dir(&self) -> &Path {
+        return self.lock_dir.as_path();
     }
 
     pub fn get_version(&self) -> String {
