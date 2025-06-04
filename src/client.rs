@@ -128,7 +128,12 @@ fn send_file(host: String, filename: String) -> Result<(), Box<dyn std::error::E
         if offset == 0 {
             println!("sending {}...", filename);
         } else {
-            println!("resuming {} from {:.2}MB", filename, offset / 1024 / 1024);
+            println!(
+                "resuming {} [{:.2}MB/{:.2}MB]",
+                filename,
+                offset / 1024 / 1024,
+                file_size / 1024 / 1024,
+            );
         }
 
         let mut first = true;
