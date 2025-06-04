@@ -1,16 +1,25 @@
 use std::{
     error::Error,
-    fs::{self, File},
-    io::{Seek, SeekFrom},
+    fs::{self, File, OpenOptions},
+    io::{self, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
 use thiserror::Error;
 
+use crate::lock::LockFile;
+
+// TODO: figure out these errors. they don't work well when used with both check_file and start_transfer
 #[derive(Error, Debug)]
 pub enum RaptorBoostError {
     #[error("path is not clean")]
     PathSanitization,
+    #[error("couldn't lock")]
+    LockFailure,
+    #[error("transfer already complete")]
+    TransferAlreadyComplete,
+    #[error("checksum mismatch")]
+    ChecksumMismatch,
     #[error("other error: `{0}`")]
     OtherError(String),
 }
@@ -28,6 +37,47 @@ pub struct RaptorBoostController {
 pub enum CheckFileResult {
     FileComplete,
     FilePartialOffset(u64),
+}
+
+pub struct RaptorBoostTransfer {
+    sha256sum: String,
+    complete_dir: PathBuf,
+    partial_dir: PathBuf,
+    f: File,
+    _l: LockFile,
+    hasher: ring::digest::Context,
+}
+
+impl RaptorBoostTransfer {
+    pub fn write(&mut self, d: &[u8]) -> Result<usize, std::io::Error> {
+        let res = self.f.write(d);
+
+        match res {
+            Ok(_) => self.hasher.update(&d),
+            _ => (),
+        }
+
+        return res;
+    }
+
+    pub fn complete(self) -> Result<(), RaptorBoostError> {
+        let calc_sha256sum: String = hex::encode(self.hasher.finish());
+        let complete_path = self.complete_dir.join(&self.sha256sum);
+        let partial_path = self.partial_dir.join(&self.sha256sum);
+
+        if self.sha256sum != calc_sha256sum {
+            match std::fs::remove_file(&partial_path) {
+                Ok(_) => (),
+                Err(e) => return Err(RaptorBoostError::OtherError(e.to_string())),
+            }
+            return Err(RaptorBoostError::ChecksumMismatch);
+        }
+
+        match std::fs::rename(partial_path, complete_path) {
+            Ok(_) => todo!(),
+            Err(_) => todo!(),
+        }
+    }
 }
 
 impl RaptorBoostController {
@@ -64,6 +114,75 @@ impl RaptorBoostController {
             partial_dir,
             complete_dir,
             lock_dir,
+        })
+    }
+
+    pub fn start_transfer(&self, sha256sum: &str) -> Result<RaptorBoostTransfer, RaptorBoostError> {
+        // lock partial
+        let partial_lock_path = self.get_lock_dir().join(&sha256sum);
+        let partial_lock = match LockFile::open(partial_lock_path.to_owned()) {
+            Ok(l) => l,
+            Err(e) => {
+                println!("error locking {}: {}", partial_lock_path.display(), e);
+                return Err(RaptorBoostError::LockFailure);
+            }
+        };
+
+        // check this file's state
+        let file_state = match self.check_file(&sha256sum) {
+            Ok(s) => s,
+            Err(e) => return Err(e),
+        };
+
+        match file_state {
+            CheckFileResult::FileComplete => return Err(RaptorBoostError::TransferAlreadyComplete),
+            _ => (),
+        }
+
+        // start writing partial file
+        let partial_path = self.partial_dir.join(&sha256sum);
+        let mut f = match OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&partial_path)
+        {
+            Ok(f) => f,
+            Err(e) => return Err(RaptorBoostError::OtherError(e.to_string())),
+        };
+
+        // calculate initial checksum
+        match f.seek(io::SeekFrom::Start(0)) {
+            Err(e) => return Err(RaptorBoostError::OtherError(e.to_string())),
+            _ => (),
+        }
+
+        let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+        let mut buffer = [0; 8192];
+        loop {
+            match f.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    hasher.update(&buffer[..n]);
+                }
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(RaptorBoostError::OtherError(e.to_string())),
+            }
+        }
+
+        // jump to end
+        match f.seek(io::SeekFrom::End(0)) {
+            Err(e) => return Err(RaptorBoostError::OtherError(e.to_string())),
+            _ => (),
+        }
+
+        Ok(RaptorBoostTransfer {
+            f,
+            _l: partial_lock,
+            hasher,
+            sha256sum: sha256sum.to_owned(),
+            complete_dir: self.complete_dir.to_owned(),
+            partial_dir: self.partial_dir.to_owned(),
         })
     }
 

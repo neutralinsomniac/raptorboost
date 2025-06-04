@@ -1,9 +1,4 @@
-use std::fs::OpenOptions;
-use std::fs::{self};
-use std::io::{self, ErrorKind, Read, Seek, Write};
-
 use crate::controller::{self, RaptorBoostError};
-use crate::lock::LockFile;
 use crate::proto::raptor_boost_server::RaptorBoost;
 use crate::proto::{
     FileData, FileState, GetVersionRequest, GetVersionResponse, SendFileDataResponse,
@@ -37,6 +32,11 @@ impl RaptorBoost for RaptorBoostService {
                     return Err(Status::invalid_argument(e.to_string()));
                 }
                 RaptorBoostError::OtherError(e) => return Err(Status::internal(e)),
+                RaptorBoostError::LockFailure => return Err(Status::unavailable("couldn't lock!")),
+                RaptorBoostError::TransferAlreadyComplete => {
+                    return Err(Status::already_exists("transfer already exists!"));
+                }
+                _ => todo!("sort out these extra errors"),
             },
         };
 
@@ -68,91 +68,59 @@ impl RaptorBoost for RaptorBoostService {
             return Err(Status::internal("first packet did not contain sha256sum"));
         };
 
-        // check this file's state
-        let Ok(file_state) = self.controller.check_file(&sha256sum) else {
-            return Err(Status::internal("error checking file state"));
-        };
-
-        match file_state {
-            controller::CheckFileResult::FileComplete => {
-                return Err(Status::already_exists("already exists"));
-            }
-            controller::CheckFileResult::FilePartialOffset(_) => (),
-        }
-
-        // lock partial
-        let partial_lock_path = self.controller.get_lock_dir().join(&sha256sum);
-        let _partial_lock = match LockFile::open(partial_lock_path.to_owned()) {
-            Ok(l) => l,
-            Err(e) => {
-                println!("error locking {}: {}", partial_lock_path.display(), e);
-                return Err(Status::unavailable("couldn't lock!"));
-            }
-        };
-
-        // start writing partial file
-        let partial_path = self.controller.get_partial_dir().join(&sha256sum);
-        let mut f = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(&partial_path)?;
-
-        // calculate initial checksum
-        f.seek(io::SeekFrom::Start(0))?;
-        let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
-        let mut buffer = [0; 8192];
-        loop {
-            match f.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => {
-                    hasher.update(&buffer[..n]);
+        let mut transfer_object = match self.controller.start_transfer(&sha256sum) {
+            Ok(t) => t,
+            Err(e) => match e {
+                RaptorBoostError::LockFailure => return Err(Status::unavailable("couldn't lock!")),
+                RaptorBoostError::PathSanitization => {
+                    return Err(Status::invalid_argument("bad argument"));
                 }
-                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => Err(e)?,
-            }
-        }
-
-        // jump to end
-        f.seek(io::SeekFrom::End(0))?;
+                RaptorBoostError::OtherError(e) => return Err(Status::internal(e)),
+                RaptorBoostError::TransferAlreadyComplete => {
+                    return Err(Status::already_exists("already exists"));
+                }
+                _ => panic!("sort out these extra errors"),
+            },
+        };
 
         // write initial data first
         let total = first_file_data.data.len();
         let mut num_written = 0;
 
         while num_written < total {
-            num_written += f.write(&first_file_data.data)?;
+            num_written += transfer_object.write(&first_file_data.data)?;
         }
-        hasher.update(&first_file_data.data);
 
         // now loop over remaining message stream
         while let Some(data) = stream.message().await? {
             let total = data.data.len();
             let mut num_written = 0;
             while num_written < total {
-                num_written += f.write(&data.data)?;
+                num_written += transfer_object.write(&data.data)?;
             }
-            hasher.update(&data.data);
         }
-
-        let calc_sha256sum: String = hex::encode(hasher.finish());
 
         let mut resp = SendFileDataResponse::default();
-        if calc_sha256sum != sha256sum {
-            match fs::remove_file(&partial_path) {
-                Ok(_) => (),
-                Err(e) => println!("warning: couldn't remove {}: {}", partial_path.display(), e),
+
+        match transfer_object.complete() {
+            Ok(_) => {
+                resp.status = SendFileDataStatus::SendfiledatastatusComplete.into();
+                return Ok(Response::new(resp));
             }
-            resp.status = SendFileDataStatus::SendfiledatastatusErrorChecksum.into();
-            return Ok(Response::new(resp));
+            Err(e) => match e {
+                RaptorBoostError::OtherError(e) => {
+                    resp.status = SendFileDataStatus::SendfiledatastatusUnspecified.into();
+                    return Err(Status::internal(format!(
+                        "how did we even get here?: {}",
+                        e
+                    )));
+                }
+                RaptorBoostError::ChecksumMismatch => {
+                    resp.status = SendFileDataStatus::SendfiledatastatusErrorChecksum.into();
+                    return Ok(Response::new(resp));
+                }
+                _ => panic!("need to fix this case"),
+            },
         }
-
-        let complete_path = self.controller.get_complete_dir().join(&sha256sum);
-
-        std::fs::rename(partial_path, complete_path)?;
-
-        resp.status = SendFileDataStatus::SendfiledatastatusComplete.into();
-
-        Ok(Response::new(resp))
     }
 }
