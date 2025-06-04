@@ -11,6 +11,7 @@ use ring;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::io::{BufReader, Seek, SeekFrom, Write};
+use std::process::ExitCode;
 use std::time;
 use tokio::runtime::Runtime;
 use tonic::Request;
@@ -53,13 +54,15 @@ impl<R: Read> IterChunks for R {
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
-    #[arg(trailing_var_arg = true)]
-    file: Vec<String>,
-    #[arg(long)]
+    #[arg(long, short, default_value = "7272")]
+    port: u16,
+    #[arg(index = 1)]
     host: String,
+    #[arg(trailing_var_arg = true, index = 2)]
+    files: Vec<String>,
 }
 
-fn send_file(host: String, filename: String) -> Result<(), Box<dyn std::error::Error>> {
+fn send_file(host: String, port: u16, filename: String) -> Result<(), Box<dyn std::error::Error>> {
     let rt = Runtime::new()?;
     let mut buffer = [0; 8192];
 
@@ -82,10 +85,11 @@ fn send_file(host: String, filename: String) -> Result<(), Box<dyn std::error::E
     let sha256sum: String = hex::encode(hasher.finish());
 
     rt.block_on(async {
-        let mut client = match RaptorBoostClient::connect(format!("http://{}:7272", host)).await {
+        let mut client = match RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await
+        {
             Ok(c) => c,
             Err(e) => {
-                println!("error connecting: {}", e);
+                eprintln!("error connecting: {}", e);
                 return;
             }
         };
@@ -98,7 +102,7 @@ fn send_file(host: String, filename: String) -> Result<(), Box<dyn std::error::E
         {
             Ok(r) => r,
             Err(e) => {
-                println!("error uploading file: {}", e);
+                eprintln!("error uploading file: {}", e);
                 return;
             }
         };
@@ -106,12 +110,12 @@ fn send_file(host: String, filename: String) -> Result<(), Box<dyn std::error::E
         let upload_file_resp = upload_file_resp.into_inner();
         let offset = match upload_file_resp.file_state() {
             FileState::FilestateNeedMoreData => upload_file_resp.offset.unwrap(),
-            FileState::FilestateUnspecified => {
-                println!("how did we get here?");
-                return;
-            }
             FileState::FilestateComplete => {
                 println!("file already transferred!");
+                return;
+            }
+            _ => {
+                eprintln!("how did we get here?");
                 return;
             }
         };
@@ -120,7 +124,7 @@ fn send_file(host: String, filename: String) -> Result<(), Box<dyn std::error::E
         match f.seek(SeekFrom::Start(offset)) {
             Ok(_) => (),
             Err(e) => {
-                println!("error seeking: {}", e);
+                eprintln!("error seeking: {}", e);
                 return;
             }
         }
@@ -187,31 +191,37 @@ fn send_file(host: String, filename: String) -> Result<(), Box<dyn std::error::E
         match client.send_file_data(request).await {
             Ok(r) => match r.into_inner().status() {
                 proto::SendFileDataStatus::SendfiledatastatusUnspecified => {
-                    println!("\runspecified error occurred");
+                    eprintln!("\runspecified error occurred");
                 }
                 proto::SendFileDataStatus::SendfiledatastatusComplete => {
-                    println!("\rtransfer complete!");
+                    eprintln!("\rtransfer complete!");
                 }
 
                 proto::SendFileDataStatus::SendfiledatastatusErrorChecksum => {
-                    println!("\rchecksum error!");
+                    eprintln!("\rchecksum error!");
                 }
             },
-            Err(e) => println!("\rerror streaming: {}", e),
+            Err(e) => eprintln!("\rerror streaming: {}", e),
         };
     });
 
     Ok(())
 }
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+fn main() -> ExitCode {
     let args = Args::parse();
 
-    for f in &args.file {
-        match send_file(args.host.to_string(), f.to_string()) {
+    if args.files.len() == 0 {
+        eprintln!("no file(s) specified");
+        return ExitCode::FAILURE;
+    }
+
+    for f in &args.files {
+        match send_file(args.host.to_string(), args.port, f.to_string()) {
             Ok(_) => (),
             Err(e) => println!("error sending {}: {}", f, e),
         }
     }
 
-    Ok(())
+    ExitCode::SUCCESS
 }
