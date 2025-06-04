@@ -116,8 +116,7 @@ impl RaptorBoost for RaptorBoostService {
                     )));
                 }
                 RaptorBoostError::ChecksumMismatch => {
-                    resp.status = SendFileDataStatus::SendfiledatastatusErrorChecksum.into();
-                    return Ok(Response::new(resp));
+                    return Err(Status::data_loss("checksum mismatch!"));
                 }
                 _ => panic!("need to fix this case"),
             },

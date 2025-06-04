@@ -66,16 +66,13 @@ impl RaptorBoostTransfer {
         let partial_path = self.partial_dir.join(&self.sha256sum);
 
         if self.sha256sum != calc_sha256sum {
-            match std::fs::remove_file(&partial_path) {
-                Ok(_) => (),
-                Err(e) => return Err(RaptorBoostError::OtherError(e.to_string())),
-            }
+            let _ = std::fs::remove_file(&partial_path); // nothing we can do if this fails
             return Err(RaptorBoostError::ChecksumMismatch);
         }
 
         match std::fs::rename(partial_path, complete_path) {
-            Ok(_) => todo!(),
-            Err(_) => todo!(),
+            Ok(_) => Ok(()),
+            Err(e) => Err(RaptorBoostError::OtherError(e.to_string())),
         }
     }
 }
