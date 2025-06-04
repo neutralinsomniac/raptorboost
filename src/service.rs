@@ -1,8 +1,9 @@
 use crate::controller::{self, RaptorBoostError};
 use crate::proto::raptor_boost_server::RaptorBoost;
 use crate::proto::{
-    FileData, FileState, GetVersionRequest, GetVersionResponse, SendFileDataResponse,
-    SendFileDataStatus, UploadFileRequest, UploadFileResponse,
+    AssignNameRequest, AssignNameResponse, AssignNameStatus, FileData, FileState,
+    GetVersionRequest, GetVersionResponse, SendFileDataResponse, SendFileDataStatus,
+    UploadFileRequest, UploadFileResponse,
 };
 use tonic::{Request, Response, Status, Streaming};
 
@@ -117,5 +118,14 @@ impl RaptorBoost for RaptorBoostService {
                 _ => return Err(Status::internal("unexpected error occurred")),
             },
         }
+    }
+
+    async fn assign_name(
+        &self,
+        request: Request<AssignNameRequest>,
+    ) -> Result<Response<AssignNameResponse>, Status> {
+        Ok(Response::new(AssignNameResponse {
+            status: AssignNameStatus::AssignnamestatusSuccess.into(),
+        }))
     }
 }

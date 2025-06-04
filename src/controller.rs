@@ -33,6 +33,7 @@ pub struct RaptorBoostControllerError(String);
 pub struct RaptorBoostController {
     partial_dir: PathBuf,
     complete_dir: PathBuf,
+    name_dir: PathBuf,
     lock_dir: PathBuf,
 }
 
@@ -101,6 +102,12 @@ impl RaptorBoostController {
             fs::create_dir(&complete_dir)?;
         }
 
+        let name_dir = output_dir.as_path().join("names");
+
+        if !name_dir.exists() {
+            fs::create_dir(&name_dir)?;
+        }
+
         let lock_dir = output_dir.as_path().join("lock");
 
         if lock_dir.exists() {
@@ -112,6 +119,7 @@ impl RaptorBoostController {
         Ok(RaptorBoostController {
             partial_dir,
             complete_dir,
+            name_dir,
             lock_dir,
         })
     }

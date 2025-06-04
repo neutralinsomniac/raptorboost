@@ -5,6 +5,7 @@ service RaptorBoost {
   rpc GetVersion (GetVersionRequest) returns (GetVersionResponse);
   rpc UploadFile (UploadFileRequest) returns (UploadFileResponse);
   rpc SendFileData (stream FileData) returns (SendFileDataResponse);
+  rpc AssignName (AssignNameRequest) returns (AssignNameResponse);
 }
 
 message GetVersionRequest {}
@@ -38,6 +39,22 @@ enum SendFileDataStatus {
   SENDFILEDATASTATUS_COMPLETE = 1;
   SENDFILEDATASTATUS_ERROR_CHECKSUM = 2;
 }
+
 message SendFileDataResponse {
   SendFileDataStatus status = 1;
+}
+
+message AssignNameRequest {
+  string sha256sum = 1;
+  string name = 2;
+}
+
+enum AssignNameStatus {
+  ASSIGNNAMESTATUS_UNSPECIFIED = 0;
+  ASSIGNNAMESTATUS_SUCCESS = 1;
+  ASSIGNNAMESTATUS_ALREADY_EXISTS = 2;
+}
+
+message AssignNameResponse {
+  AssignNameStatus status = 1;
 }
