@@ -79,7 +79,7 @@ impl RaptorBoost for RaptorBoostService {
                 RaptorBoostError::TransferAlreadyComplete => {
                     return Err(Status::already_exists("already exists"));
                 }
-                _ => panic!("sort out these extra errors"),
+                _ => return Err(Status::internal("unexpected error occurred")),
             },
         };
 
@@ -108,17 +108,13 @@ impl RaptorBoost for RaptorBoostService {
                 return Ok(Response::new(resp));
             }
             Err(e) => match e {
-                RaptorBoostError::OtherError(e) => {
-                    resp.status = SendFileDataStatus::SendfiledatastatusUnspecified.into();
-                    return Err(Status::internal(format!(
-                        "how did we even get here?: {}",
-                        e
-                    )));
+                RaptorBoostError::RenameError(e) => {
+                    return Err(Status::internal(e));
                 }
                 RaptorBoostError::ChecksumMismatch => {
                     return Err(Status::data_loss("checksum mismatch!"));
                 }
-                _ => panic!("need to fix this case"),
+                _ => return Err(Status::internal("unexpected error occurred")),
             },
         }
     }

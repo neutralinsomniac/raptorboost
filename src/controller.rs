@@ -20,6 +20,8 @@ pub enum RaptorBoostError {
     TransferAlreadyComplete,
     #[error("checksum mismatch")]
     ChecksumMismatch,
+    #[error("error renaming file: `{0}`")]
+    RenameError(String),
     #[error("other error: `{0}`")]
     OtherError(String),
 }
@@ -70,9 +72,12 @@ impl RaptorBoostTransfer {
             return Err(RaptorBoostError::ChecksumMismatch);
         }
 
-        match std::fs::rename(partial_path, complete_path) {
+        match std::fs::rename(&partial_path, &complete_path) {
             Ok(_) => Ok(()),
-            Err(e) => Err(RaptorBoostError::OtherError(e.to_string())),
+            Err(e) => {
+                let _ = std::fs::remove_file(&partial_path); // nothing we can do if this fails
+                Err(RaptorBoostError::RenameError(e.to_string()))
+            }
         }
     }
 }
