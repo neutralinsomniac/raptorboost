@@ -288,8 +288,6 @@ fn main() -> ExitCode {
 
     drop(bar);
 
-    println!("\rdone!");
-
     let file_states = match get_file_states(&args.host, args.port, sorted_sha256es) {
         Ok(f) => f,
         Err(e) => {
