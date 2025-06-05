@@ -56,17 +56,6 @@ impl<R: Read> IterChunks for R {
     }
 }
 
-#[derive(Parser)]
-#[command(version, about)]
-struct Args {
-    #[arg(long, short, default_value = "7272")]
-    port: u16,
-    #[arg(index = 1)]
-    host: String,
-    #[arg(trailing_var_arg = true, index = 2)]
-    files: Vec<String>,
-}
-
 struct FilenameWithState {
     filename: String,
     sha256sum: String,
@@ -215,6 +204,18 @@ fn get_file_states(
     })
 }
 
+#[derive(Parser)]
+#[command(version, about)]
+struct Args {
+    #[arg(long, short, action, help = "don't sort files by size")]
+    no_sort: bool,
+    #[arg(long, short, default_value = "7272")]
+    port: u16,
+    #[arg(index = 1)]
+    host: String,
+    #[arg(trailing_var_arg = true, index = 2)]
+    files: Vec<String>,
+}
 fn main() -> ExitCode {
     let args = Args::parse();
 
@@ -244,11 +245,13 @@ fn main() -> ExitCode {
 
     let mut sorted_files: Vec<&String> = deduped_filenames.iter().collect();
 
-    sorted_files.sort_by(|a, b| {
-        let size_a = File::open(a).unwrap().metadata().unwrap().size();
-        let size_b = File::open(b).unwrap().metadata().unwrap().size();
-        size_a.cmp(&size_b)
-    });
+    if !args.no_sort {
+        sorted_files.sort_by(|a, b| {
+            let size_a = File::open(a).unwrap().metadata().unwrap().size();
+            let size_b = File::open(b).unwrap().metadata().unwrap().size();
+            size_a.cmp(&size_b)
+        })
+    }
 
     let mut sorted_sha256es = Vec::new();
 
