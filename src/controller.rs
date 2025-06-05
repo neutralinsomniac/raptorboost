@@ -54,9 +54,8 @@ impl RaptorBoostTransfer {
     pub fn write(&mut self, d: &[u8]) -> Result<usize, std::io::Error> {
         let res = self.f.write(d);
 
-        match res {
-            Ok(_) => self.hasher.update(&d),
-            _ => (),
+        if res.is_ok() {
+            self.hasher.update(&d)
         }
 
         return res;

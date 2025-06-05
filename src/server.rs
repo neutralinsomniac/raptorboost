@@ -77,6 +77,12 @@ async fn main() -> ExitCode {
         }
     };
 
+    println!(
+        "listening on {}:{}",
+        bind_addr.ip().to_string(),
+        bind_addr.port()
+    );
+
     match Server::builder()
         .add_service(RaptorBoostServer::new(rb_service))
         .serve(bind_addr)
