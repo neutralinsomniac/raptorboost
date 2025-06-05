@@ -11,6 +11,7 @@ use ring;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::io::{BufReader, Seek, SeekFrom, Write};
+use std::os::unix::fs::MetadataExt;
 use std::process::ExitCode;
 use std::time;
 use tokio::runtime::Runtime;
@@ -216,7 +217,15 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    for f in &args.files {
+    let mut sorted_files = args.files.to_owned();
+
+    sorted_files.sort_by(|a, b| {
+        let size_a = File::open(a).unwrap().metadata().unwrap().size();
+        let size_b = File::open(b).unwrap().metadata().unwrap().size();
+        size_a.cmp(&size_b)
+    });
+
+    for f in &sorted_files {
         match send_file(args.host.to_string(), args.port, f.to_string()) {
             Ok(_) => (),
             Err(e) => println!("error sending {}: {}", f, e),
