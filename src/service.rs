@@ -1,9 +1,11 @@
+use std::collections::HashSet;
+
 use crate::controller::{self, RaptorBoostError};
 use crate::proto::raptor_boost_server::RaptorBoost;
 use crate::proto::{
-    AssignNameRequest, AssignNameResponse, AssignNameStatus, FileData, FileState,
+    AssignNameRequest, AssignNameResponse, AssignNameStatus, FileData, FileState, FileStateResult,
     GetVersionRequest, GetVersionResponse, SendFileDataResponse, SendFileDataStatus,
-    UploadFileRequest, UploadFileResponse,
+    UploadFilesRequest, UploadFilesResponse,
 };
 use tonic::{Request, Response, Status, Streaming};
 
@@ -22,36 +24,57 @@ impl RaptorBoost for RaptorBoostService {
         }))
     }
 
-    async fn upload_file(
+    async fn upload_files(
         &self,
-        request: Request<UploadFileRequest>,
-    ) -> Result<Response<UploadFileResponse>, Status> {
-        let check_file_result = match self.controller.check_file(&request.into_inner().sha256sum) {
-            Ok(r) => r,
-            Err(e) => match e {
-                RaptorBoostError::PathSanitization => {
-                    return Err(Status::invalid_argument(e.to_string()));
-                }
-                RaptorBoostError::OtherError(e) => return Err(Status::internal(e)),
-                RaptorBoostError::LockFailure => return Err(Status::unavailable("couldn't lock!")),
-                RaptorBoostError::TransferAlreadyComplete => {
-                    return Err(Status::already_exists("transfer already exists!"));
-                }
-                _ => todo!("sort out these extra errors"),
-            },
-        };
+        request: Request<UploadFilesRequest>,
+    ) -> Result<Response<UploadFilesResponse>, Status> {
+        let mut seen_sha256es = HashSet::new();
 
-        match check_file_result {
-            controller::CheckFileResult::FileComplete => Ok(Response::new(UploadFileResponse {
-                file_state: FileState::FilestateComplete.into(),
-                offset: None,
+        let file_states: Result<Vec<FileState>, _> = request
+            .into_inner()
+            .sha256sums
+            .iter()
+            .filter_map(|sha256sum| {
+                if seen_sha256es.contains(sha256sum) {
+                    return None;
+                }
+
+                seen_sha256es.insert(sha256sum.to_owned());
+
+                let check_file_result = match self.controller.check_file(&sha256sum) {
+                    Ok(r) => r,
+                    Err(e) => match e {
+                        RaptorBoostError::PathSanitization => {
+                            return Some(Err(Status::invalid_argument(e.to_string())));
+                        }
+                        RaptorBoostError::OtherError(e) => return Some(Err(Status::internal(e))),
+                        RaptorBoostError::LockFailure => {
+                            return Some(Err(Status::unavailable("couldn't lock!")));
+                        }
+                        _ => todo!("sort out these extra errors"),
+                    },
+                };
+
+                match check_file_result {
+                    controller::CheckFileResult::FileComplete => Some(Ok(FileState {
+                        sha256sum: sha256sum.to_owned(),
+                        state: FileStateResult::FilestateresultComplete.into(),
+                        offset: None,
+                    })),
+                    controller::CheckFileResult::FilePartialOffset(offset) => Some(Ok(FileState {
+                        sha256sum: sha256sum.to_owned(),
+                        state: FileStateResult::FilestateresultNeedMoreData.into(),
+                        offset: Some(offset),
+                    })),
+                }
+            })
+            .collect();
+
+        match file_states {
+            Ok(states) => Ok(Response::new(UploadFilesResponse {
+                file_states: states,
             })),
-            controller::CheckFileResult::FilePartialOffset(offset) => {
-                Ok(Response::new(UploadFileResponse {
-                    file_state: FileState::FilestateNeedMoreData.into(),
-                    offset: Some(offset),
-                }))
-            }
+            Err(e) => Err(Status::internal(e.to_string())),
         }
     }
 

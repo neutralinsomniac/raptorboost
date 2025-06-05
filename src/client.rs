@@ -1,12 +1,12 @@
 mod proto {
     tonic::include_proto!("raptorboost");
 }
-use proto::FileData;
 use proto::raptor_boost_client::RaptorBoostClient;
+use proto::{FileData, FileStateResult};
 
-use crate::proto::{FileState, UploadFileRequest};
+use crate::proto::{FileState, UploadFilesRequest};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::io::{BufReader, Seek, SeekFrom};
@@ -67,8 +67,18 @@ struct Args {
     files: Vec<String>,
 }
 
-fn send_file(host: String, port: u16, filename: String) -> Result<(), Box<dyn std::error::Error>> {
-    let mut f = File::open(&filename)?;
+struct FilenameWithState {
+    filename: String,
+    sha256sum: String,
+    offset: u64,
+}
+
+fn send_file(
+    host: &str,
+    port: u16,
+    file: &FilenameWithState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let f = File::open(&file.filename)?;
     let file_size = f.metadata()?.len();
 
     if file_size == 0 {
@@ -78,23 +88,10 @@ fn send_file(host: String, port: u16, filename: String) -> Result<(), Box<dyn st
     }
 
     let rt = Runtime::new()?;
-    let mut buffer = [0; 8192];
 
-    let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
-
-    println!("calculating checksum for {}...", filename);
-    loop {
-        match f.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                hasher.update(&buffer[..n]);
-            }
-            Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => Err(e)?,
-        }
-    }
-
-    let sha256sum: String = hex::encode(hasher.finish());
+    let filename = file.filename.to_owned();
+    let offset = file.offset;
+    let sha256sum = file.sha256sum.to_owned();
 
     rt.block_on(async {
         let mut client = match RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await
@@ -102,32 +99,6 @@ fn send_file(host: String, port: u16, filename: String) -> Result<(), Box<dyn st
             Ok(c) => c,
             Err(e) => {
                 eprintln!("error connecting: {}", e);
-                return;
-            }
-        };
-        let upload_file_resp = match client
-            .upload_file(Request::new(UploadFileRequest {
-                sha256sum: sha256sum.to_owned(),
-                size: file_size,
-            }))
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("error uploading file: {}", e);
-                return;
-            }
-        };
-
-        let upload_file_resp = upload_file_resp.into_inner();
-        let offset = match upload_file_resp.file_state() {
-            FileState::FilestateNeedMoreData => upload_file_resp.offset.unwrap(),
-            FileState::FilestateComplete => {
-                println!("file already transferred!");
-                return;
-            }
-            _ => {
-                eprintln!("how did we get here?");
                 return;
             }
         };
@@ -185,7 +156,7 @@ fn send_file(host: String, port: u16, filename: String) -> Result<(), Box<dyn st
                 }
                 proto::SendFileDataStatus::SendfiledatastatusComplete => {
                     let duration = time_start.elapsed().as_millis();
-                    let amount_transferred = file_size - offset;
+                    let amount_transferred = file_size - file.offset;
                     eprintln!(
                         "\rtransferred {:.2}MB in {:.2}s ({}MB/s)",
                         amount_transferred as f64 / 1024.0 / 1024.0,
@@ -213,6 +184,37 @@ fn send_file(host: String, port: u16, filename: String) -> Result<(), Box<dyn st
     Ok(())
 }
 
+fn get_file_states(
+    host: &str,
+    port: u16,
+    sha256sums: Vec<String>,
+) -> Result<Vec<FileState>, Box<dyn std::error::Error>> {
+    let rt = Runtime::new()?;
+    rt.block_on(async {
+        let mut client = match RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error connecting: {}", e);
+                return Err(Box::<dyn std::error::Error>::from("arst"));
+            }
+        };
+
+        let upload_file_resp = match client
+            .upload_files(Request::new(UploadFilesRequest { sha256sums }))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error uploading file list: {}", e);
+                return Err(Box::<dyn std::error::Error>::from("arst"));
+            }
+        };
+
+        Ok(upload_file_resp.into_inner().file_states)
+    })
+}
+
 fn main() -> ExitCode {
     let args = Args::parse();
 
@@ -238,6 +240,8 @@ fn main() -> ExitCode {
         }
     }
 
+    let mut file_sha256es = HashMap::new();
+
     let mut sorted_files: Vec<&String> = deduped_filenames.iter().collect();
 
     sorted_files.sort_by(|a, b| {
@@ -246,10 +250,71 @@ fn main() -> ExitCode {
         size_a.cmp(&size_b)
     });
 
-    for f in &sorted_files {
-        match send_file(args.host.to_string(), args.port, f.to_string()) {
+    let mut sorted_sha256es = Vec::new();
+
+    println!("calculating checksums...");
+    let bar = ProgressBar::new(sorted_files.len().try_into().unwrap());
+    for filename in sorted_files {
+        bar.inc(1);
+
+        let mut f = File::open(filename).unwrap();
+
+        let mut buffer = [0; 8192];
+
+        let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+
+        // println!("calculating checksum for {}...", filename);
+        loop {
+            match f.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => {
+                    hasher.update(&buffer[..n]);
+                }
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    eprintln!("error reading file: {}", e);
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+
+        let sha256sum = hex::encode(hasher.finish());
+        file_sha256es.insert(sha256sum.to_owned(), filename.to_owned());
+        sorted_sha256es.push(sha256sum.to_owned());
+    }
+
+    drop(bar);
+
+    println!("\rdone!");
+
+    let file_states = match get_file_states(&args.host, args.port, sorted_sha256es) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error getting file states: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // ok, we have our filename<->hash mapping and our hash<->filestate mapping, combine them
+    let filenames_with_state = file_states.iter().filter_map(|file_state| {
+        if file_state.state() == FileStateResult::FilestateresultComplete {
+            None
+        } else {
+            Some(FilenameWithState {
+                filename: file_sha256es
+                    .get(&file_state.sha256sum)
+                    .unwrap()
+                    .to_string(),
+                sha256sum: file_state.sha256sum.to_owned(),
+                offset: file_state.offset(),
+            })
+        }
+    });
+
+    for f in filenames_with_state {
+        match send_file(&args.host, args.port, &f) {
             Ok(_) => (),
-            Err(e) => println!("error sending {}: {}", f, e),
+            Err(e) => println!("error sending {}: {}", f.filename, e),
         }
     }
 

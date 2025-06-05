@@ -84,6 +84,7 @@ async fn main() -> ExitCode {
     );
 
     match Server::builder()
+        .max_concurrent_streams(100)
         .add_service(RaptorBoostServer::new(rb_service))
         .serve(bind_addr)
         .await
