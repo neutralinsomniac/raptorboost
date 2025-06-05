@@ -43,8 +43,8 @@ pub enum CheckFileResult {
 
 pub struct RaptorBoostTransfer {
     sha256sum: String,
-    complete_dir: PathBuf,
-    partial_dir: PathBuf,
+    complete_path: PathBuf,
+    partial_path: PathBuf,
     f: File,
     _l: LockFile,
     hasher: ring::digest::Context,
@@ -64,18 +64,16 @@ impl RaptorBoostTransfer {
 
     pub fn complete(self) -> Result<(), RaptorBoostError> {
         let calc_sha256sum: String = hex::encode(self.hasher.finish());
-        let complete_path = self.complete_dir.join(&self.sha256sum);
-        let partial_path = self.partial_dir.join(&self.sha256sum);
 
         if self.sha256sum != calc_sha256sum {
-            let _ = std::fs::remove_file(&partial_path); // nothing we can do if this fails
+            let _ = std::fs::remove_file(&self.partial_path); // nothing we can do if this fails
             return Err(RaptorBoostError::ChecksumMismatch);
         }
 
-        match std::fs::rename(&partial_path, &complete_path) {
+        match std::fs::rename(&self.partial_path, &self.complete_path) {
             Ok(_) => Ok(()),
             Err(e) => {
-                let _ = std::fs::remove_file(&partial_path); // nothing we can do if this fails
+                let _ = std::fs::remove_file(&self.partial_path); // nothing we can do if this fails
                 Err(RaptorBoostError::RenameError(e.to_string()))
             }
         }
@@ -183,8 +181,8 @@ impl RaptorBoostController {
             _l: partial_lock,
             hasher,
             sha256sum: sha256sum.to_owned(),
-            complete_dir: self.complete_dir.to_owned(),
-            partial_dir: self.partial_dir.to_owned(),
+            complete_path: self.complete_dir.join(&sha256sum),
+            partial_path,
         })
     }
 
