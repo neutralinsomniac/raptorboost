@@ -1,19 +1,21 @@
 mod proto {
     tonic::include_proto!("raptorboost");
 }
+use proto::FileData;
+use proto::raptor_boost_client::RaptorBoostClient;
 
 use crate::proto::{FileState, UploadFileRequest};
 
-use clap::Parser;
-use proto::FileData;
-use proto::raptor_boost_client::RaptorBoostClient;
-use ring;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
-use std::io::{BufReader, Seek, SeekFrom, Write};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::process::ExitCode;
 use std::time;
+
+use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
+use ring;
 use tokio::runtime::Runtime;
 use tonic::Request;
 
@@ -133,45 +135,22 @@ fn send_file(host: String, port: u16, filename: String) -> Result<(), Box<dyn st
         if offset == 0 {
             println!("sending {}...", filename);
         } else {
-            println!(
-                "resuming {} [{:.2}MB/{:.2}MB]",
-                filename,
-                offset / 1024 / 1024,
-                file_size / 1024 / 1024,
-            );
+            println!( "resuming {}", filename);
         }
 
         let mut first = true;
         let freader = BufReader::new(f);
 
         let mut pos: u64 = offset;
-        let mut pos_old = pos;
-        let mut percent_old: u32 = 0;
-        let mut time_old = time::Instant::now();
-        let time_start = time_old;
+        let time_start = time::Instant::now();
+        let bar = ProgressBar::new(file_size-offset).with_style(
+            ProgressStyle::with_template(
+                "{msg}[{elapsed_precise}] [eta: {eta_precise}] {bar:40} [{decimal_bytes:>7}/{decimal_total_bytes:7}] [{decimal_bytes_per_sec}]",
+            )
+            .unwrap(),
+        );
         let file_iter = freader.iter_chunks(8192).map(move |d| {
-            let percent_cur: u32 = ((pos as f64 / file_size as f64) * 100.0) as u32;
-            if percent_cur != percent_old {
-                let time_now = time::Instant::now();
-                let time_passed = (time_now.duration_since(time_old)).as_millis();
-                let mbps = match time_passed {
-                    0 => 0,
-                    _ => ((pos - pos_old) as u128 / time_passed) / 1000,
-                };
-                print!(
-                    "\r{}% [{}MB/s]",
-                    percent_cur,
-                    if mbps == 0 {
-                        "--".to_string()
-                    } else {
-                        mbps.to_string()
-                    }
-                );
-                io::stdout().flush().unwrap();
-                percent_old = percent_cur;
-                time_old = time_now;
-                pos_old = pos;
-            }
+            bar.set_position(pos-offset);
             let data = d.unwrap();
             pos += data.len() as u64;
             if first {
