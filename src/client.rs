@@ -66,11 +66,18 @@ struct Args {
 }
 
 fn send_file(host: String, port: u16, filename: String) -> Result<(), Box<dyn std::error::Error>> {
+    let mut f = File::open(&filename)?;
+    let file_size = f.metadata()?.len();
+
+    if file_size == 0 {
+        return Err(Box::<dyn std::error::Error>::from(
+            "skipping file since it's empty",
+        ));
+    }
+
     let rt = Runtime::new()?;
     let mut buffer = [0; 8192];
 
-    let mut f = File::open(&filename)?;
-    let file_size = f.metadata()?.len();
     let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
 
     println!("calculating checksum for {}...", filename);
