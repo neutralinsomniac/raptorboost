@@ -148,6 +148,7 @@ fn send_file(host: String, port: u16, filename: String) -> Result<(), Box<dyn st
         let mut pos_old = pos;
         let mut percent_old: u32 = 0;
         let mut time_old = time::Instant::now();
+        let time_start = time_old;
         let file_iter = freader.iter_chunks(8192).map(move |d| {
             let percent_cur: u32 = ((pos as f64 / file_size as f64) * 100.0) as u32;
             if percent_cur != percent_old {
@@ -195,7 +196,22 @@ fn send_file(host: String, port: u16, filename: String) -> Result<(), Box<dyn st
                     eprintln!("\runspecified error occurred");
                 }
                 proto::SendFileDataStatus::SendfiledatastatusComplete => {
-                    eprintln!("\rtransfer complete!");
+                    let duration = time_start.elapsed().as_millis();
+                    let amount_transferred = file_size - offset;
+                    eprintln!(
+                        "\rtransferred {:.2}MB in {:.2}s ({}MB/s)",
+                        amount_transferred as f64 / 1024.0 / 1024.0,
+                        duration as f64 / 1000.0,
+                        if duration != 0 {
+                            format!(
+                                "{:.2}",
+                                ((amount_transferred as f64 / 1024.0 / 1024.0)
+                                    / (duration as f64 / 1000.0))
+                            )
+                        } else {
+                            "--".to_string()
+                        },
+                    );
                 }
 
                 proto::SendFileDataStatus::SendfiledatastatusErrorChecksum => {
