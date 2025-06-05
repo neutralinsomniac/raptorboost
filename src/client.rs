@@ -104,7 +104,7 @@ fn send_file(
         if offset == 0 {
             println!("sending {}...", filename);
         } else {
-            println!( "resuming {}", filename);
+            println!( "resuming {} from {:.2} MB", filename, offset as f64 / 1000.0 / 1000.0);
         }
 
         let mut first = true;
