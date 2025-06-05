@@ -241,6 +241,11 @@ fn main() -> ExitCode {
         }
     }
 
+    if deduped_filenames.len() == 0 {
+        eprintln!("no files found");
+        return ExitCode::SUCCESS;
+    }
+
     let mut file_sha256es = HashMap::new();
 
     let mut sorted_files: Vec<&String> = deduped_filenames.iter().collect();
