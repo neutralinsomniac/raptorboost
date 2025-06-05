@@ -116,11 +116,16 @@ impl RaptorBoost for RaptorBoostService {
         }
 
         // now loop over remaining message stream
-        while let Some(data) = stream.message().await? {
-            let total = data.data.len();
-            let mut num_written = 0;
-            while num_written < total {
-                num_written += transfer_object.write(&data.data)?;
+        while let Ok(message) = stream.message().await {
+            match message {
+                Some(data) => {
+                    let total = data.data.len();
+                    let mut num_written = 0;
+                    while num_written < total {
+                        num_written += transfer_object.write(&data.data)?;
+                    }
+                }
+                None => break,
             }
         }
 
