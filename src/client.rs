@@ -258,7 +258,7 @@ fn main() -> ExitCode {
     println!("calculating checksums...");
     let bar = ProgressBar::new(sorted_files.len().try_into().unwrap());
     for filename in sorted_files {
-        bar.inc(1);
+        bar.tick(); // show the bar even if the first file takes a while to checksum
 
         let mut f = File::open(filename).unwrap();
 
@@ -284,6 +284,7 @@ fn main() -> ExitCode {
         let sha256sum = hex::encode(hasher.finish());
         file_sha256es.insert(sha256sum.to_owned(), filename.to_owned());
         sorted_sha256es.push(sha256sum.to_owned());
+        bar.inc(1);
     }
 
     drop(bar);
