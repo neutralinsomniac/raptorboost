@@ -145,7 +145,7 @@ fn send_file(
                 }
                 proto::SendFileDataStatus::SendfiledatastatusComplete => {
                     let duration = time_start.elapsed().as_millis();
-                    let amount_transferred = file_size - file.offset;
+                    let amount_transferred = file_size - offset;
                     eprintln!(
                         "\rtransferred {:.2}MB in {:.2}s ({}MB/s)",
                         amount_transferred as f64 / 1024.0 / 1024.0,
