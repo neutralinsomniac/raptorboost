@@ -6,6 +6,7 @@ use proto::raptor_boost_client::RaptorBoostClient;
 
 use crate::proto::{FileState, UploadFileRequest};
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::io::{BufReader, Seek, SeekFrom};
@@ -18,6 +19,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use ring;
 use tokio::runtime::Runtime;
 use tonic::Request;
+use walkdir::WalkDir;
 
 pub struct ToChunks<R> {
     reader: R,
@@ -219,7 +221,24 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut sorted_files = args.files.to_owned();
+    let mut deduped_filenames = HashSet::new();
+
+    for f in &args.files {
+        if File::open(f).unwrap().metadata().unwrap().is_dir() {
+            for entry in WalkDir::new(f)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| !e.file_type().is_dir())
+            {
+                let f_name = String::from(entry.path().to_string_lossy());
+                deduped_filenames.insert(f_name.clone());
+            }
+        } else {
+            deduped_filenames.insert(f.to_string());
+        }
+    }
+
+    let mut sorted_files: Vec<&String> = deduped_filenames.iter().collect();
 
     sorted_files.sort_by(|a, b| {
         let size_a = File::open(a).unwrap().metadata().unwrap().size();
