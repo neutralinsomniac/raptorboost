@@ -317,8 +317,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ok, we have our filename<->hash mapping and our hash<->filestate mapping, combine them
+    let mut num_files_up_to_date = 0;
+    let mut num_files_sent = 0;
     let filenames_with_state = file_states.iter().filter_map(|file_state| {
         if file_state.state() == FileStateResult::FilestateresultComplete {
+            num_files_up_to_date += 1;
             None
         } else {
             Some(FilenameWithState {
@@ -334,24 +337,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5: upload actual file data
     // doing this so we don't have to collect() the above iterator
-    let mut sent_at_least_one_file = false;
+    let mut num_send_errors = 0;
     for f in filenames_with_state {
         match send_file(&args.host, args.port, &f) {
-            Ok(_) => sent_at_least_one_file = true,
+            Ok(_) => num_files_sent += 1,
             Err(e) => match e {
                 SendFileError::EmptyFileError => println!("skipped empty file {}", f.filename,),
                 SendFileError::OpenError { source } => {
+                    num_send_errors += 1;
                     println!("error opening file '{}': {}", f.filename, source)
                 }
                 SendFileError::OtherError(error) => {
+                    num_send_errors += 1;
                     println!("error occurred with file '{}': {}", f.filename, error)
                 }
             },
         }
     }
 
-    if sent_at_least_one_file == false {
-        println!("no files were sent")
+    println!("");
+
+    if num_files_up_to_date != 0 {
+        println!("{} files were already up to date", num_files_up_to_date);
+    }
+
+    println!("{} files were sent", num_files_sent);
+
+    if num_send_errors > 0 {
+        println!("couldn't send {} files due to errors", num_send_errors)
     }
 
     Ok(())
