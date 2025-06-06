@@ -11,12 +11,12 @@ use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::io::{BufReader, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
-use std::process::ExitCode;
 use std::time;
 
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use ring;
+use thiserror::Error;
 use tokio::runtime::Runtime;
 use tonic::Request;
 use walkdir::WalkDir;
@@ -204,6 +204,10 @@ fn get_file_states(
     })
 }
 
+#[derive(Error, Debug)]
+#[error("{0}")]
+pub struct MainError(String);
+
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
@@ -216,18 +220,21 @@ struct Args {
     #[arg(trailing_var_arg = true, index = 2)]
     files: Vec<String>,
 }
-fn main() -> ExitCode {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     if args.files.len() == 0 {
-        eprintln!("no file(s) specified");
-        return ExitCode::FAILURE;
+        return Err(Box::new(MainError("no file(s) specified".to_string())));
     }
 
     let mut deduped_filenames = HashSet::new();
 
     for f in &args.files {
-        if File::open(f).unwrap().metadata().unwrap().is_dir() {
+        let fd = match File::open(f) {
+            Ok(fd) => fd,
+            Err(e) => return Err(Box::new(MainError(format!("couldn't open '{}': {}", f, e)))),
+        };
+        if fd.metadata()?.is_dir() {
             for entry in WalkDir::new(f)
                 .into_iter()
                 .filter_map(Result::ok)
@@ -242,8 +249,7 @@ fn main() -> ExitCode {
     }
 
     if deduped_filenames.len() == 0 {
-        eprintln!("no files found");
-        return ExitCode::SUCCESS;
+        return Err(Box::new(MainError("no files found".to_string())));
     }
 
     let mut file_sha256es = HashMap::new();
@@ -280,8 +286,7 @@ fn main() -> ExitCode {
                 }
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    eprintln!("error reading file: {}", e);
-                    return ExitCode::FAILURE;
+                    return Err(Box::new(MainError(format!("error reading file: {}", e))));
                 }
             }
         }
@@ -297,8 +302,10 @@ fn main() -> ExitCode {
     let file_states = match get_file_states(&args.host, args.port, sorted_sha256es) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("error getting file states: {}", e);
-            return ExitCode::FAILURE;
+            return Err(Box::new(MainError(format!(
+                "error getting file states: {}",
+                e
+            ))));
         }
     };
 
@@ -332,5 +339,5 @@ fn main() -> ExitCode {
         println!("all files already transferred!")
     }
 
-    ExitCode::SUCCESS
+    Ok(())
 }
