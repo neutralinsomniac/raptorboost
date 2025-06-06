@@ -1,6 +1,7 @@
 mod proto {
     tonic::include_proto!("raptorboost");
 }
+use crate::proto::SendFileDataResponse;
 use proto::raptor_boost_client::RaptorBoostClient;
 use proto::{FileData, FileStateResult};
 
@@ -11,14 +12,17 @@ use std::fs::File;
 use std::io::{self, ErrorKind, Read};
 use std::io::{BufReader, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::time;
 
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use ring;
+use spat;
 use thiserror::Error;
 use tokio::runtime::Runtime;
-use tonic::Request;
+use tonic::{Request, Response};
 use walkdir::WalkDir;
 
 pub struct ToChunks<R> {
@@ -64,12 +68,27 @@ struct FilenameWithState {
 
 #[derive(Error, Debug)]
 enum SendFileError {
+    #[error(transparent)]
+    ConnectError(#[from] tonic::transport::Error),
     #[error("open error")]
     OpenError { source: std::io::Error },
+    #[error("seek error")]
+    SeekError { source: std::io::Error },
+    #[error(transparent)]
+    ResponseError(#[from] tonic::Status),
+    #[error("checksum mismatch")]
+    ChecksumMismatch,
     #[error(transparent)]
     OtherError(#[from] std::io::Error),
+    #[error("unspecified error")]
+    UnspecifiedError,
 }
-fn send_file(host: &str, port: u16, file: &FilenameWithState) -> Result<(), SendFileError> {
+fn send_file(
+    host: &str,
+    port: u16,
+    file: &FilenameWithState,
+    multibar: &mut MultiProgress,
+) -> Result<(), SendFileError> {
     let file_size = File::open(&file.filename)
         .map_err(|source| SendFileError::OpenError { source })?
         .metadata()?
@@ -81,50 +100,42 @@ fn send_file(host: &str, port: u16, file: &FilenameWithState) -> Result<(), Send
     let offset = file.offset;
     let sha256sum = file.sha256sum.to_owned();
 
-    rt.block_on(async {
-        let mut client = match RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("error connecting: {}", e);
-                return;
-            }
-        };
+    let time_start = time::Instant::now();
 
-        let mut f = File::open(&filename).unwrap();
-        match f.seek(SeekFrom::Start(offset)) {
-            Ok(_) => (),
-            Err(e) => {
-                eprintln!("error seeking: {}", e);
-                return;
-            }
-        }
+    let resp: Result<Response<SendFileDataResponse>, SendFileError> = rt.block_on(async {
+        let mut client = RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await?;
 
-        if offset == 0 {
-            println!("sending {}...", filename);
-        } else {
-            println!(
-                "resuming {} from {:.2} MB",
-                filename,
-                offset as f64 / 1000.0 / 1000.0
-            );
-        }
+        let mut f = File::open(&filename)?;
+
+        f.seek(SeekFrom::Start(offset))
+            .map_err(|source| SendFileError::SeekError { source })?;
+
+        // if offset == 0 {
+        //     println!("sending {}...", filename);
+        // } else {
+        //     println!(
+        //         "resuming {} from {:.2} MB",
+        //         filename,
+        //         offset as f64 / 1000.0 / 1000.0
+        //     );
+        // }
 
         let mut first = true;
         let freader = BufReader::new(f);
 
         let mut pos: u64 = offset;
-        let time_start = time::Instant::now();
         let bar = ProgressBar::new(file_size - offset).with_style(
             ProgressStyle::with_template(
                 "[{elapsed_precise}] \
                  [eta: {eta_precise}] \
-                 {bar:40} \
+                 {wide_bar} \
                  [{decimal_bytes:>7}/{decimal_total_bytes:7}] \
                  [{decimal_bytes_per_sec}]",
             )
             .unwrap(),
         );
+
+        let bar = multibar.add(bar);
 
         // we fork here to handle the case where a file iterator on an empty (or a partial file with 0 bytes left to transfer) wouldn't iterate
         let resp = if file_size - offset == 0 {
@@ -137,13 +148,7 @@ fn send_file(host: &str, port: u16, file: &FilenameWithState) -> Result<(), Send
             vec_iter.push(fdata);
 
             let request = Request::new(tokio_stream::iter(vec_iter));
-            match client.send_file_data(request).await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("error streaming: {}", e);
-                    return;
-                }
-            }
+            client.send_file_data(request).await?
         } else {
             let file_iter = freader.iter_chunks(8192).map(move |d| {
                 bar.set_position(pos - offset);
@@ -163,44 +168,25 @@ fn send_file(host: &str, port: u16, file: &FilenameWithState) -> Result<(), Send
                 }
             });
             let request = Request::new(tokio_stream::iter(file_iter));
-            match client.send_file_data(request).await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("error streaming: {}", e);
-                    return;
-                }
-            }
+            client.send_file_data(request).await?
         };
 
-        match resp.into_inner().status() {
-            proto::SendFileDataStatus::SendfiledatastatusUnspecified => {
-                eprintln!("\runspecified error occurred");
-            }
-            proto::SendFileDataStatus::SendfiledatastatusComplete => {
-                let duration = time_start.elapsed().as_millis();
-                let amount_transferred = file_size - offset;
-                eprintln!(
-                    "\rtransferred {:.2}MB in {:.2}s ({}MB/s)",
-                    amount_transferred as f64 / 1024.0 / 1024.0,
-                    duration as f64 / 1000.0,
-                    if duration != 0 {
-                        format!(
-                            "{:.2}",
-                            ((amount_transferred as f64 / 1024.0 / 1024.0)
-                                / (duration as f64 / 1000.0))
-                        )
-                    } else {
-                        "--".to_string()
-                    },
-                );
-            }
-            proto::SendFileDataStatus::SendfiledatastatusErrorChecksum => {
-                eprintln!("\rchecksum error!");
-            }
-        };
+        Ok(resp)
     });
 
-    Ok(())
+    let resp = resp?;
+
+    match resp.into_inner().status() {
+        proto::SendFileDataStatus::SendfiledatastatusUnspecified => {
+            eprintln!("\runspecified error occurred");
+            Err(SendFileError::UnspecifiedError)
+        }
+        proto::SendFileDataStatus::SendfiledatastatusComplete => Ok(()),
+        proto::SendFileDataStatus::SendfiledatastatusErrorChecksum => {
+            eprintln!("\rchecksum error!");
+            Err(SendFileError::ChecksumMismatch)
+        }
+    }
 }
 
 fn get_file_states(
@@ -302,7 +288,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut file_sha256es = HashMap::new();
     let mut sorted_sha256es = Vec::new();
     println!("calculating checksums...");
-    let bar = ProgressBar::new(sorted_files.len().try_into().unwrap());
+    let mut multibar = MultiProgress::new();
+    let bar = multibar.add(ProgressBar::new(sorted_files.len().try_into().unwrap()));
     for filename in sorted_files {
         bar.tick(); // show the bar even if the first file takes a while to checksum
 
@@ -333,6 +320,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     drop(bar);
 
+    println!("getting file states from remote...");
     // 4: get file states through grpc
     let file_states = match get_file_states(&args.host, args.port, sorted_sha256es) {
         Ok(f) => f,
@@ -344,12 +332,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // ok, we have our filename<->hash mapping and our hash<->filestate mapping, combine them
     let mut num_files_up_to_date = 0;
     let mut num_files_sent = 0;
+    let mut num_files_to_send = 0;
+    for file_state in &file_states {
+        match file_state.state() {
+            FileStateResult::FilestateresultUnspecified => eprintln!("wut"),
+            FileStateResult::FilestateresultNeedMoreData => num_files_to_send += 1,
+            FileStateResult::FilestateresultComplete => num_files_up_to_date += 1,
+        }
+    }
+
+    // ok, we have our filename<->hash mapping and our hash<->filestate mapping, combine them
     let filenames_with_state = file_states.iter().filter_map(|file_state| {
         if file_state.state() == FileStateResult::FilestateresultComplete {
-            num_files_up_to_date += 1;
             None
         } else {
             Some(FilenameWithState {
@@ -365,10 +361,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5: upload actual file data
     // doing this so we don't have to collect() the above iterator
+    println!("sending files...");
     let mut num_send_errors = 0;
+    let total_files_bar = multibar.add(ProgressBar::new(num_files_to_send).with_style(
+        ProgressStyle::with_template("[{elapsed_precise}] {wide_bar} {pos:>7}/{len:7}")?,
+    ));
+    total_files_bar.set_position(0);
+    let filename_bar = multibar.add(
+        ProgressBar::new(0).with_style(ProgressStyle::with_template("sending {msg}").unwrap()),
+    );
+
     for f in filenames_with_state {
-        match send_file(&args.host, args.port, &f) {
-            Ok(_) => num_files_sent += 1,
+        let pathbuf = PathBuf::from_str(&f.filename).unwrap();
+        let truncated_filename = spat::shorten(pathbuf);
+        let truncated_filename = truncated_filename.display().to_string();
+        filename_bar.set_message(truncated_filename);
+
+        match send_file(&args.host, args.port, &f, &mut multibar) {
+            Ok(_) => {
+                num_files_sent += 1;
+                total_files_bar.inc(1)
+            }
             Err(e) => match e {
                 SendFileError::OpenError { source } => {
                     num_send_errors += 1;
@@ -378,9 +391,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     num_send_errors += 1;
                     println!("error occurred with file '{}': {}", f.filename, error)
                 }
+                _ => todo!(),
             },
         }
     }
+
+    drop(filename_bar);
+    drop(total_files_bar);
 
     println!("");
 
