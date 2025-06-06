@@ -62,18 +62,23 @@ struct FilenameWithState {
     offset: u64,
 }
 
-fn send_file(
-    host: &str,
-    port: u16,
-    file: &FilenameWithState,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let f = File::open(&file.filename)?;
-    let file_size = f.metadata()?.len();
+#[derive(Error, Debug)]
+enum SendFileError {
+    #[error("empty file")]
+    EmptyFileError,
+    #[error("open error")]
+    OpenError { source: std::io::Error },
+    #[error(transparent)]
+    OtherError(#[from] std::io::Error),
+}
+fn send_file(host: &str, port: u16, file: &FilenameWithState) -> Result<(), SendFileError> {
+    let file_size = File::open(&file.filename)
+        .map_err(|source| SendFileError::OpenError { source })?
+        .metadata()?
+        .len();
 
     if file_size == 0 {
-        return Err(Box::<dyn std::error::Error>::from(
-            "skipping file since it's empty",
-        ));
+        return Err(SendFileError::EmptyFileError);
     }
 
     let rt = Runtime::new()?;
@@ -229,6 +234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut deduped_filenames = HashSet::new();
 
+    // 1: dedup files
     for f in &args.files {
         let fd = match File::open(f) {
             Ok(fd) => fd,
@@ -252,8 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(Box::new(MainError("no files found".to_string())));
     }
 
-    let mut file_sha256es = HashMap::new();
-
+    // 2: sort files
     let mut sorted_files: Vec<&String> = deduped_filenames.iter().collect();
 
     if !args.no_sort {
@@ -264,8 +269,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     }
 
+    // 3: calculate checksums
+    let mut file_sha256es = HashMap::new();
     let mut sorted_sha256es = Vec::new();
-
     println!("calculating checksums...");
     let bar = ProgressBar::new(sorted_files.len().try_into().unwrap());
     for filename in sorted_files {
@@ -299,6 +305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     drop(bar);
 
+    // 4: get file states through grpc
     let file_states = match get_file_states(&args.host, args.port, sorted_sha256es) {
         Ok(f) => f,
         Err(e) => {
@@ -325,18 +332,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // 5: upload actual file data
     // doing this so we don't have to collect() the above iterator
     let mut sent_at_least_one_file = false;
     for f in filenames_with_state {
-        sent_at_least_one_file = true;
         match send_file(&args.host, args.port, &f) {
-            Ok(_) => (),
-            Err(e) => println!("error sending {}: {}", f.filename, e),
+            Ok(_) => sent_at_least_one_file = true,
+            Err(e) => match e {
+                SendFileError::EmptyFileError => println!("skipped empty file {}", f.filename,),
+                SendFileError::OpenError { source } => {
+                    println!("error opening file '{}': {}", f.filename, source)
+                }
+                SendFileError::OtherError(error) => {
+                    println!("error occurred with file '{}': {}", f.filename, error)
+                }
+            },
         }
     }
 
     if sent_at_least_one_file == false {
-        println!("all files already transferred!")
+        println!("no files were sent")
     }
 
     Ok(())
