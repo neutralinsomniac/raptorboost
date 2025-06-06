@@ -189,8 +189,10 @@ fn get_file_states(
         {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("error connecting: {}", e);
-                return Err(Box::<dyn std::error::Error>::from("arst"));
+                return Err(Box::<dyn std::error::Error>::from(format!(
+                    "error connecting: {}",
+                    e
+                )));
             }
         };
 
@@ -200,8 +202,10 @@ fn get_file_states(
         {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("error uploading file list: {}", e);
-                return Err(Box::<dyn std::error::Error>::from("arst"));
+                return Err(Box::<dyn std::error::Error>::from(format!(
+                    "error uploading file list: {}",
+                    e
+                )));
             }
         };
 
