@@ -64,8 +64,6 @@ struct FilenameWithState {
 
 #[derive(Error, Debug)]
 enum SendFileError {
-    #[error("empty file")]
-    EmptyFileError,
     #[error("open error")]
     OpenError { source: std::io::Error },
     #[error(transparent)]
@@ -76,10 +74,6 @@ fn send_file(host: &str, port: u16, file: &FilenameWithState) -> Result<(), Send
         .map_err(|source| SendFileError::OpenError { source })?
         .metadata()?
         .len();
-
-    if file_size == 0 {
-        return Err(SendFileError::EmptyFileError);
-    }
 
     let rt = Runtime::new()?;
 
@@ -109,7 +103,11 @@ fn send_file(host: &str, port: u16, file: &FilenameWithState) -> Result<(), Send
         if offset == 0 {
             println!("sending {}...", filename);
         } else {
-            println!( "resuming {} from {:.2} MB", filename, offset as f64 / 1000.0 / 1000.0);
+            println!(
+                "resuming {} from {:.2} MB",
+                filename,
+                offset as f64 / 1000.0 / 1000.0
+            );
         }
 
         let mut first = true;
@@ -117,61 +115,88 @@ fn send_file(host: &str, port: u16, file: &FilenameWithState) -> Result<(), Send
 
         let mut pos: u64 = offset;
         let time_start = time::Instant::now();
-        let bar = ProgressBar::new(file_size-offset).with_style(
+        let bar = ProgressBar::new(file_size - offset).with_style(
             ProgressStyle::with_template(
-                "{msg}[{elapsed_precise}] [eta: {eta_precise}] {bar:40} [{decimal_bytes:>7}/{decimal_total_bytes:7}] [{decimal_bytes_per_sec}]",
+                "[{elapsed_precise}] \
+                 [eta: {eta_precise}] \
+                 {bar:40} \
+                 [{decimal_bytes:>7}/{decimal_total_bytes:7}] \
+                 [{decimal_bytes_per_sec}]",
             )
             .unwrap(),
         );
-        let file_iter = freader.iter_chunks(8192).map(move |d| {
-            bar.set_position(pos-offset);
-            let data = d.unwrap();
-            pos += data.len() as u64;
-            if first {
-                first = false;
-                FileData {
-                    sha256sum: Some(sha256sum.to_string()),
-                    data,
-                }
-            } else {
-                FileData {
-                    sha256sum: None,
-                    data,
+
+        // we fork here to handle the case where a file iterator on an empty (or a partial file with 0 bytes left to transfer) wouldn't iterate
+        let resp = if file_size - offset == 0 {
+            let mut vec_iter = Vec::new();
+            let fdata = FileData {
+                sha256sum: Some(sha256sum),
+                data: vec![],
+            };
+
+            vec_iter.push(fdata);
+
+            let request = Request::new(tokio_stream::iter(vec_iter));
+            match client.send_file_data(request).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error streaming: {}", e);
+                    return;
                 }
             }
-        });
-
-        let request = Request::new(tokio_stream::iter(file_iter));
-
-        match client.send_file_data(request).await {
-            Ok(r) => match r.into_inner().status() {
-                proto::SendFileDataStatus::SendfiledatastatusUnspecified => {
-                    eprintln!("\runspecified error occurred");
+        } else {
+            let file_iter = freader.iter_chunks(8192).map(move |d| {
+                bar.set_position(pos - offset);
+                let data = d.unwrap();
+                pos += data.len() as u64;
+                if first {
+                    first = false;
+                    FileData {
+                        sha256sum: Some(sha256sum.to_string()),
+                        data,
+                    }
+                } else {
+                    FileData {
+                        sha256sum: None,
+                        data,
+                    }
                 }
-                proto::SendFileDataStatus::SendfiledatastatusComplete => {
-                    let duration = time_start.elapsed().as_millis();
-                    let amount_transferred = file_size - offset;
-                    eprintln!(
-                        "\rtransferred {:.2}MB in {:.2}s ({}MB/s)",
-                        amount_transferred as f64 / 1024.0 / 1024.0,
-                        duration as f64 / 1000.0,
-                        if duration != 0 {
-                            format!(
-                                "{:.2}",
-                                ((amount_transferred as f64 / 1024.0 / 1024.0)
-                                    / (duration as f64 / 1000.0))
-                            )
-                        } else {
-                            "--".to_string()
-                        },
-                    );
+            });
+            let request = Request::new(tokio_stream::iter(file_iter));
+            match client.send_file_data(request).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error streaming: {}", e);
+                    return;
                 }
+            }
+        };
 
-                proto::SendFileDataStatus::SendfiledatastatusErrorChecksum => {
-                    eprintln!("\rchecksum error!");
-                }
-            },
-            Err(e) => eprintln!("\rerror streaming: {}", e),
+        match resp.into_inner().status() {
+            proto::SendFileDataStatus::SendfiledatastatusUnspecified => {
+                eprintln!("\runspecified error occurred");
+            }
+            proto::SendFileDataStatus::SendfiledatastatusComplete => {
+                let duration = time_start.elapsed().as_millis();
+                let amount_transferred = file_size - offset;
+                eprintln!(
+                    "\rtransferred {:.2}MB in {:.2}s ({}MB/s)",
+                    amount_transferred as f64 / 1024.0 / 1024.0,
+                    duration as f64 / 1000.0,
+                    if duration != 0 {
+                        format!(
+                            "{:.2}",
+                            ((amount_transferred as f64 / 1024.0 / 1024.0)
+                                / (duration as f64 / 1000.0))
+                        )
+                    } else {
+                        "--".to_string()
+                    },
+                );
+            }
+            proto::SendFileDataStatus::SendfiledatastatusErrorChecksum => {
+                eprintln!("\rchecksum error!");
+            }
         };
     });
 
@@ -287,7 +312,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
 
-        // println!("calculating checksum for {}...", filename);
         loop {
             match f.read(&mut buffer) {
                 Ok(0) => break,
@@ -346,7 +370,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match send_file(&args.host, args.port, &f) {
             Ok(_) => num_files_sent += 1,
             Err(e) => match e {
-                SendFileError::EmptyFileError => println!("skipped empty file {}", f.filename,),
                 SendFileError::OpenError { source } => {
                     num_send_errors += 1;
                     println!("error opening file '{}': {}", f.filename, source)

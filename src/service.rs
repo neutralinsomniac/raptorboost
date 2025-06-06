@@ -3,9 +3,9 @@ use std::collections::HashSet;
 use crate::controller::{self, RaptorBoostError};
 use crate::proto::raptor_boost_server::RaptorBoost;
 use crate::proto::{
-    AssignNameRequest, AssignNameResponse, AssignNameStatus, FileData, FileState, FileStateResult,
-    GetVersionRequest, GetVersionResponse, SendFileDataResponse, SendFileDataStatus,
-    UploadFilesRequest, UploadFilesResponse,
+    AssignNameRequest, AssignNameResponse, FileData, FileState, FileStateResult, GetVersionRequest,
+    GetVersionResponse, SendFileDataResponse, SendFileDataStatus, UploadFilesRequest,
+    UploadFilesResponse,
 };
 use tonic::{Request, Response, Status, Streaming};
 
@@ -152,8 +152,6 @@ impl RaptorBoost for RaptorBoostService {
         &self,
         request: Request<AssignNameRequest>,
     ) -> Result<Response<AssignNameResponse>, Status> {
-        Ok(Response::new(AssignNameResponse {
-            status: AssignNameStatus::AssignnamestatusSuccess.into(),
-        }))
+        Ok(Response::new(AssignNameResponse { statuses: vec![] }))
     }
 }

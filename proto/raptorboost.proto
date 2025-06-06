@@ -49,9 +49,13 @@ message SendFileDataResponse {
   SendFileDataStatus status = 1;
 }
 
-message AssignNameRequest {
+message NameSha256sumAssociation {
   string sha256sum = 1;
   string name = 2;
+}
+
+message AssignNameRequest {
+  repeated NameSha256sumAssociation name_to_sha256es = 1;
 }
 
 enum AssignNameStatus {
@@ -60,6 +64,11 @@ enum AssignNameStatus {
   ASSIGNNAMESTATUS_ALREADY_EXISTS = 2;
 }
 
+message NameStatus {
+  string name = 1;
+  AssignNameStatus status = 2;
+}
+
 message AssignNameResponse {
-  AssignNameStatus status = 1;
+  repeated NameStatus statuses = 1;
 }
