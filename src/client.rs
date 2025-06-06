@@ -326,16 +326,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // doing this so we don't have to collect() the above iterator
-    let mut send_at_least_one_file = false;
+    let mut sent_at_least_one_file = false;
     for f in filenames_with_state {
-        send_at_least_one_file = true;
+        sent_at_least_one_file = true;
         match send_file(&args.host, args.port, &f) {
             Ok(_) => (),
             Err(e) => println!("error sending {}: {}", f.filename, e),
         }
     }
 
-    if send_at_least_one_file == false {
+    if sent_at_least_one_file == false {
         println!("all files already transferred!")
     }
 
