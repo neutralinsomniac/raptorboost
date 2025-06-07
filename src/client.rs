@@ -280,7 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sorted_files.sort_by(|a, b| {
             let size_a = File::open(a).unwrap().metadata().unwrap().size();
             let size_b = File::open(b).unwrap().metadata().unwrap().size();
-            size_a.cmp(&size_b)
+            size_b.cmp(&size_a)
         })
     }
 
