@@ -14,7 +14,7 @@ use std::io::{BufReader, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time;
+use std::time::{self, Duration};
 
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -366,6 +366,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_files_bar = multibar.add(ProgressBar::new(num_files_to_send).with_style(
         ProgressStyle::with_template("[{elapsed_precise}] {wide_bar} {pos:>7}/{len:7}")?,
     ));
+    total_files_bar.enable_steady_tick(Duration::new(0, 100000000)); // 10 times per second
     total_files_bar.set_position(0);
     let filename_bar = multibar.add(
         ProgressBar::new(0).with_style(ProgressStyle::with_template("sending {msg}").unwrap()),
