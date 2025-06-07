@@ -260,10 +260,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|e| !e.file_type().is_dir())
             {
                 let f_name = String::from(entry.path().to_string_lossy());
-                deduped_filenames.insert(f_name.clone());
+                deduped_filenames.insert(f_name);
             }
         } else {
-            deduped_filenames.insert(f.to_string());
+            deduped_filenames.insert(f.to_owned());
         }
     }
 
@@ -312,8 +312,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let sha256sum = hex::encode(hasher.finish());
-        file_sha256es.insert(sha256sum.to_owned(), filename.to_owned());
-        sorted_sha256es.push(sha256sum.to_owned());
+        file_sha256es.insert(sha256sum.to_owned(), filename);
+        sorted_sha256es.push(sha256sum);
         bar.inc(1);
     }
 
