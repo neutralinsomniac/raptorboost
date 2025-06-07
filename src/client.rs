@@ -172,9 +172,7 @@ fn send_file(
         Ok(resp)
     });
 
-    let resp = resp?;
-
-    match resp.into_inner().status() {
+    match resp?.into_inner().status() {
         proto::SendFileDataStatus::SendfiledatastatusUnspecified => {
             eprintln!("\runspecified error occurred");
             Err(SendFileError::UnspecifiedError)
