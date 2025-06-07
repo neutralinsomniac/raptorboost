@@ -14,7 +14,7 @@ use std::io::{BufReader, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::{self, Duration};
+use std::time::Duration;
 
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -99,8 +99,6 @@ fn send_file(
     let filename = file.filename.to_owned();
     let offset = file.offset;
     let sha256sum = file.sha256sum.to_owned();
-
-    let time_start = time::Instant::now();
 
     let resp: Result<Response<SendFileDataResponse>, SendFileError> = rt.block_on(async {
         let mut client = RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await?;
@@ -395,7 +393,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     num_send_errors += 1;
                     println!("error occurred with file '{}': {}", f.filename, error)
                 }
-                _ => todo!(),
+                SendFileError::ConnectError(error) => {
+                    num_send_errors += 1;
+                    println!("connection error: {}", error)
+                }
+                SendFileError::SeekError { source } => {
+                    num_send_errors += 1;
+                    println!("error occurred with file '{}': {}", f.filename, source)
+                }
+                SendFileError::ResponseError(status) => {
+                    num_send_errors += 1;
+                    println!("response error for '{}': {}", f.filename, status)
+                }
+                SendFileError::ChecksumMismatch => println!("checksum mismatch"),
+                SendFileError::UnspecifiedError => println!("unspecified error"),
             },
         }
     }
