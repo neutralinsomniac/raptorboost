@@ -277,6 +277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sorted_files: Vec<&String> = deduped_filenames.iter().collect();
 
     if !args.no_sort {
+        println!("[+] sorting files...");
         sorted_files.sort_by(|a, b| {
             let size_a = File::open(a).unwrap().metadata().unwrap().size();
             let size_b = File::open(b).unwrap().metadata().unwrap().size();
@@ -287,7 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3: calculate checksums
     let mut file_sha256es = HashMap::new();
     let mut sorted_sha256es = Vec::new();
-    println!("calculating checksums...");
+    println!("[+] calculating checksums...");
     let mut multibar = MultiProgress::new();
     let bar = multibar.add(ProgressBar::new(sorted_files.len().try_into().unwrap()));
     for filename in sorted_files {
@@ -320,7 +321,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     drop(bar);
 
-    println!("getting file states from remote...");
+    println!("[+] getting file states from remote...");
     // 4: get file states through grpc
     let file_states = match get_file_states(&args.host, args.port, sorted_sha256es) {
         Ok(f) => f,
@@ -361,7 +362,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5: upload actual file data
     // doing this so we don't have to collect() the above iterator
-    println!("sending files...");
+    if num_files_to_send > 0 {
+        println!("[+] sending {} files...", num_files_to_send);
+    }
     let mut num_send_errors = 0;
     let total_files_bar = multibar.add(ProgressBar::new(num_files_to_send).with_style(
         ProgressStyle::with_template("[{elapsed_precise}] {wide_bar} {pos:>7}/{len:7}")?,
@@ -369,7 +372,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     total_files_bar.enable_steady_tick(Duration::new(0, 100000000)); // 10 times per second
     total_files_bar.set_position(0);
     let filename_bar = multibar.add(
-        ProgressBar::new(0).with_style(ProgressStyle::with_template("sending {msg}").unwrap()),
+        ProgressBar::new(0).with_style(ProgressStyle::with_template("sending {msg}...").unwrap()),
     );
 
     for f in filenames_with_state {
