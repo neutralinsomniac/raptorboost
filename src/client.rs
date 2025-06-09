@@ -305,7 +305,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sorted_sha256es.push(sha256sum.clone());
         sha256_to_filenames
             .entry(sha256sum)
-            .or_insert(vec![filename]);
+            .or_insert(vec![])
+            .push(filename);
         bar.inc(1);
     }
 
