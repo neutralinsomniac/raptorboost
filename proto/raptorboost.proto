@@ -37,6 +37,7 @@ message UploadFilesResponse {
 message FirstFileData {
   string sha256sum = 1;
   bool force = 2;
+  bytes data = 3;
 }
 
 message FileData {

@@ -67,6 +67,7 @@ impl RaptorBoostTransfer {
         let calc_sha256sum: String = hex::encode(self.hasher.finish());
 
         if self.sha256sum != calc_sha256sum {
+            let _ = remove_file(&self.partial_path).is_err();
             return Err(RaptorBoostError::ChecksumMismatch);
         }
 

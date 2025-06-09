@@ -119,6 +119,14 @@ impl RaptorBoost for RaptorBoostService {
             },
         };
 
+        // write initial data first
+        let total = first_file_data.data.len();
+        let mut num_written = 0;
+
+        while num_written < total {
+            num_written += transfer_object.write(&first_file_data.data[num_written..])?;
+        }
+
         // now loop over remaining message stream
         while let Ok(message) = stream.message().await {
             match message {

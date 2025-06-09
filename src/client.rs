@@ -133,7 +133,11 @@ fn send_file(
             // stream expects an iterable, so we create one here to hold the single file data object we're about to send
             let mut vec_iter = Vec::new();
             let fdata = FileData {
-                first_or_data: Some(FirstOrData::First(FirstFileData { sha256sum, force })),
+                first_or_data: Some(FirstOrData::First(FirstFileData {
+                    sha256sum,
+                    force,
+                    data: vec![],
+                })),
             };
 
             vec_iter.push(fdata);
@@ -151,6 +155,7 @@ fn send_file(
                         first_or_data: Some(FirstOrData::First(FirstFileData {
                             sha256sum: sha256sum.clone(),
                             force,
+                            data,
                         })),
                     }
                 } else {
