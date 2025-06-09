@@ -245,7 +245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for entry in WalkDir::new(f)
                 .into_iter()
                 .filter_map(Result::ok)
-                .filter(|e| !e.file_type().is_dir())
+                .filter(|e| !e.file_type().is_dir() && !e.file_type().is_symlink())
             {
                 let f_name = String::from(entry.path().to_string_lossy());
                 deduped_filenames.insert(f_name);
@@ -295,7 +295,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    return Err(Box::new(MainError(format!("error reading file: {}", e))));
+                    return Err(Box::new(MainError(format!(
+                        "error reading `{}`: {}",
+                        filename, e
+                    ))));
                 }
             }
         }
