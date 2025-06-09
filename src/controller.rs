@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use safe_path::scoped_join;
 use thiserror::Error;
 
 use crate::lock::LockFile;
@@ -12,8 +13,8 @@ use crate::lock::LockFile;
 // TODO: figure out these errors. they don't work well when used with both check_file and start_transfer
 #[derive(Error, Debug)]
 pub enum RaptorBoostError {
-    #[error("path is not clean")]
-    PathSanitization,
+    #[error("path {0} is not clean")]
+    PathSanitization(String),
     #[error("couldn't lock")]
     LockFailure,
     #[error("transfer already complete")]
@@ -125,7 +126,11 @@ impl RaptorBoostController {
 
     pub fn start_transfer(&self, sha256sum: &str) -> Result<RaptorBoostTransfer, RaptorBoostError> {
         // lock partial
-        let partial_lock_path = self.get_lock_dir().join(&sha256sum);
+        let partial_lock_path = match scoped_join(self.get_lock_dir(), &sha256sum) {
+            Ok(p) => p,
+            Err(_) => return Err(RaptorBoostError::PathSanitization(sha256sum.to_string())),
+        };
+
         let partial_lock = match LockFile::open(partial_lock_path.to_owned()) {
             Ok(l) => l,
             Err(e) => {
@@ -204,41 +209,30 @@ impl RaptorBoostController {
         return self.lock_dir.as_path();
     }
 
+    pub fn get_name_dir(&self) -> &Path {
+        return self.name_dir.as_path();
+    }
+
     pub fn get_version(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }
 
     pub fn check_file(&self, sha256sum: &str) -> Result<CheckFileResult, RaptorBoostError> {
         // first look for file in complete
-        let full_complete_file = self.get_complete_dir().join(&sha256sum);
-
-        match full_complete_file.parent() {
-            Some(p) => {
-                if p != self.complete_dir {
-                    return Err(RaptorBoostError::PathSanitization);
-                }
-            }
-            None => {
-                return Err(RaptorBoostError::PathSanitization);
-            }
-        }
+        let full_complete_file = match scoped_join(self.get_complete_dir(), &sha256sum) {
+            Ok(f) => f,
+            Err(_) => return Err(RaptorBoostError::PathSanitization(sha256sum.to_string())),
+        };
 
         if full_complete_file.exists() {
             return Ok(CheckFileResult::FileComplete);
         }
 
-        let full_partial_file = self.get_partial_dir().join(&sha256sum);
-
-        match full_partial_file.parent() {
-            Some(p) => {
-                if p != self.partial_dir {
-                    return Err(RaptorBoostError::PathSanitization);
-                }
-            }
-            None => {
-                return Err(RaptorBoostError::PathSanitization);
-            }
-        }
+        // what about partial?
+        let full_partial_file = match scoped_join(self.get_partial_dir(), &sha256sum) {
+            Ok(f) => f,
+            Err(_) => return Err(RaptorBoostError::PathSanitization(sha256sum.to_string())),
+        };
 
         if full_partial_file.exists() {
             let mut f = match File::open(full_partial_file) {
@@ -254,6 +248,9 @@ impl RaptorBoostController {
             return Ok(CheckFileResult::FilePartialOffset(offset));
         }
 
+        // new file!
         return Ok(CheckFileResult::FilePartialOffset(0));
     }
+
+    pub fn assign_name() {}
 }

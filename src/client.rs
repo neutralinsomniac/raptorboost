@@ -3,7 +3,7 @@ mod proto {
 }
 use crate::proto::SendFileDataResponse;
 use proto::raptor_boost_client::RaptorBoostClient;
-use proto::{FileData, FileStateResult};
+use proto::{AssignNamesRequest, AssignNamesResponse, FileData, FileStateResult, Sha256Filenames};
 
 use crate::proto::{FileState, UploadFilesRequest};
 
@@ -107,16 +107,6 @@ fn send_file(
 
         f.seek(SeekFrom::Start(offset))
             .map_err(|source| SendFileError::SeekError { source })?;
-
-        // if offset == 0 {
-        //     println!("sending {}...", filename);
-        // } else {
-        //     println!(
-        //         "resuming {} from {:.2} MB",
-        //         filename,
-        //         offset as f64 / 1000.0 / 1000.0
-        //     );
-        // }
 
         let mut first = true;
         let freader = BufReader::new(f);
@@ -282,7 +272,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 3: calculate checksums
-    let mut file_sha256es = HashMap::new();
+    let mut filename_to_sha256es = HashMap::new();
+    let mut sha256_to_filenames = HashMap::new();
     let mut sorted_sha256es = Vec::new();
     println!("[+] calculating checksums...");
     let mut multibar = MultiProgress::new();
@@ -310,8 +301,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let sha256sum = hex::encode(hasher.finish());
-        file_sha256es.insert(sha256sum.to_owned(), filename);
-        sorted_sha256es.push(sha256sum);
+        filename_to_sha256es.insert(sha256sum.to_owned(), filename);
+        sorted_sha256es.push(sha256sum.clone());
+        sha256_to_filenames
+            .entry(sha256sum)
+            .or_insert(vec![filename]);
         bar.inc(1);
     }
 
@@ -346,7 +340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         } else {
             Some(FilenameWithState {
-                filename: file_sha256es
+                filename: filename_to_sha256es
                     .get(&file_state.sha256sum)
                     .unwrap()
                     .to_string(),
@@ -412,6 +406,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(filename_bar);
     drop(total_files_bar);
 
+    // 5: send names
+    println!("[+] updating filenames...");
+    let rt = Runtime::new()?;
+    let assign_names_resp = rt.block_on(async {
+        let mut client =
+            match RaptorBoostClient::connect(format!("http://{}:{}", args.host, args.port)).await {
+                Ok(c) => c,
+                Err(e) => {
+                    return Err(Box::<dyn std::error::Error>::from(format!(
+                        "error connecting: {}",
+                        e
+                    )));
+                }
+            };
+
+        let _assign_names_request = match client
+            .assign_names(Request::new(AssignNamesRequest {
+                sha256_to_filenames: sha256_to_filenames
+                    .iter()
+                    .map(|(sha256sum, filenames)| -> Sha256Filenames {
+                        Sha256Filenames {
+                            sha256sum: sha256sum.to_string(),
+                            names: filenames.iter().map(|&name| name.to_string()).collect(),
+                        }
+                    })
+                    .collect(),
+            }))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(Box::<dyn std::error::Error>::from(format!(
+                    "error uploading file list: {}",
+                    e
+                )));
+            }
+        };
+
+        // println!("{}", assign_names_request.into_inner().statuses);
+        Ok(())
+    });
+
+    println!("{:?}", assign_names_resp?);
     println!("");
 
     if num_files_up_to_date != 0 {

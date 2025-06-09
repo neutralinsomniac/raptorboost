@@ -1,12 +1,18 @@
 use std::collections::HashSet;
+use std::fs::{create_dir, create_dir_all};
+use std::os::unix::fs::symlink;
+use std::path::Path;
 
 use crate::controller::{self, RaptorBoostError};
 use crate::proto::raptor_boost_server::RaptorBoost;
 use crate::proto::{
-    AssignNameRequest, AssignNameResponse, FileData, FileState, FileStateResult, GetVersionRequest,
-    GetVersionResponse, SendFileDataResponse, SendFileDataStatus, UploadFilesRequest,
-    UploadFilesResponse,
+    AssignNamesRequest, AssignNamesResponse, FileData, FileState, FileStateResult,
+    GetVersionRequest, GetVersionResponse, SendFileDataResponse, SendFileDataStatus,
+    UploadFilesRequest, UploadFilesResponse,
 };
+
+use chrono::Local;
+use safe_path::scoped_resolve;
 use tonic::{Request, Response, Status, Streaming};
 
 pub struct RaptorBoostService {
@@ -44,7 +50,7 @@ impl RaptorBoost for RaptorBoostService {
                 let check_file_result = match self.controller.check_file(&sha256sum) {
                     Ok(r) => r,
                     Err(e) => match e {
-                        RaptorBoostError::PathSanitization => {
+                        RaptorBoostError::PathSanitization(e) => {
                             return Some(Err(Status::invalid_argument(e.to_string())));
                         }
                         RaptorBoostError::OtherError(e) => return Some(Err(Status::internal(e))),
@@ -96,8 +102,8 @@ impl RaptorBoost for RaptorBoostService {
             Ok(t) => t,
             Err(e) => match e {
                 RaptorBoostError::LockFailure => return Err(Status::unavailable("couldn't lock!")),
-                RaptorBoostError::PathSanitization => {
-                    return Err(Status::invalid_argument("bad argument"));
+                RaptorBoostError::PathSanitization(e) => {
+                    return Err(Status::invalid_argument(e.to_string()));
                 }
                 RaptorBoostError::OtherError(e) => return Err(Status::internal(e)),
                 RaptorBoostError::TransferAlreadyComplete => {
@@ -148,10 +154,61 @@ impl RaptorBoost for RaptorBoostService {
         }
     }
 
-    async fn assign_name(
+    async fn assign_names(
         &self,
-        request: Request<AssignNameRequest>,
-    ) -> Result<Response<AssignNameResponse>, Status> {
-        Ok(Response::new(AssignNameResponse { statuses: vec![] }))
+        request: Request<AssignNamesRequest>,
+    ) -> Result<Response<AssignNamesResponse>, Status> {
+        // convenience
+        let now = Local::now();
+
+        let name_dir = self
+            .controller
+            .get_name_dir()
+            .join(format!("{}", now.format("%Y-%m-%d_%H:%M:%S")));
+
+        match create_dir(&name_dir) {
+            Ok(_) => (),
+            Err(e) => {
+                return Err(Status::invalid_argument(format!(
+                    "couldn't create timestamped directory: {}",
+                    e
+                )));
+            }
+        }
+
+        let complete_dir = self.controller.get_complete_dir();
+        let assign_name_request = request.into_inner();
+
+        for sha256tonames in assign_name_request.sha256_to_filenames {
+            for name in sha256tonames.names {
+                let mut path = Path::new(&name);
+
+                // strip leading "/"
+                if path.has_root() {
+                    path = path.strip_prefix("/").unwrap();
+                }
+
+                // strip leading ..'s
+                while path.starts_with("..") {
+                    path = path.strip_prefix("..").unwrap();
+                }
+
+                // split into path + directory component
+                let dir = path.parent().unwrap();
+                let file = path.file_name().unwrap();
+
+                let _ = create_dir_all(&name_dir.join(scoped_resolve(&name_dir, dir).unwrap()));
+
+                let safe_target_sha256sum = &complete_dir
+                    .join(scoped_resolve(&complete_dir, &sha256tonames.sha256sum).unwrap());
+
+                let safe_target_link_dir = &name_dir.join(scoped_resolve(&name_dir, dir).unwrap());
+                let safe_target_link =
+                    &safe_target_link_dir.join(scoped_resolve(safe_target_link_dir, file).unwrap());
+
+                symlink(safe_target_sha256sum, safe_target_link).unwrap();
+            }
+        }
+        Ok(Response::new(AssignNamesResponse { statuses: vec![] }))
     }
 }

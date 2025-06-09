@@ -5,7 +5,7 @@ service RaptorBoost {
   rpc GetVersion (GetVersionRequest) returns (GetVersionResponse);
   rpc UploadFiles (UploadFilesRequest) returns (UploadFilesResponse);
   rpc SendFileData (stream FileData) returns (SendFileDataResponse);
-  rpc AssignName (AssignNameRequest) returns (AssignNameResponse);
+  rpc AssignNames (AssignNamesRequest) returns (AssignNamesResponse);
 }
 
 message GetVersionRequest {}
@@ -49,13 +49,13 @@ message SendFileDataResponse {
   SendFileDataStatus status = 1;
 }
 
-message NameSha256sumAssociation {
+message Sha256Filenames {
   string sha256sum = 1;
-  string name = 2;
+  repeated string names = 2;
 }
 
-message AssignNameRequest {
-  repeated NameSha256sumAssociation name_to_sha256es = 1;
+message AssignNamesRequest {
+  repeated Sha256Filenames sha256_to_filenames = 1;
 }
 
 enum AssignNameStatus {
@@ -69,6 +69,6 @@ message NameStatus {
   AssignNameStatus status = 2;
 }
 
-message AssignNameResponse {
+message AssignNamesResponse {
   repeated NameStatus statuses = 1;
 }
