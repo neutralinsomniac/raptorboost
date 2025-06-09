@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::fs::{create_dir, create_dir_all};
+use std::fs::{create_dir, create_dir_all, remove_dir_all};
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
@@ -13,7 +13,7 @@ use crate::proto::{
 };
 
 use chrono::Local;
-use safe_path::scoped_resolve;
+use safe_path::{scoped_join, scoped_resolve};
 use tonic::{Request, Response, Status, Streaming};
 
 pub struct RaptorBoostService {
@@ -42,6 +42,7 @@ impl RaptorBoost for RaptorBoostService {
             .sha256sums
             .iter()
             .filter_map(|sha256sum| {
+                // we've already handled this result; filter it out from our results
                 if seen_sha256es.contains(sha256sum) {
                     return None;
                 }
@@ -170,23 +171,31 @@ impl RaptorBoost for RaptorBoostService {
         // convenience
         let now = Local::now();
 
-        let transfer_dir = self
-            .controller
-            .get_transfers_dir()
-            .join(format!("{}", now.format("%Y-%m-%d_%H:%M:%S")));
+        let assign_name_request = request.into_inner();
+
+        let transfer_dir = scoped_join(
+            self.controller.get_transfers_dir(),
+            match assign_name_request.name {
+                None => format!("{}", now.format("%Y-%m-%d_%H:%M:%S")),
+                Some(ref name) => name.to_string(),
+            },
+        )?;
+
+        if assign_name_request.force() {
+            let _ = remove_dir_all(&transfer_dir);
+        }
 
         match create_dir(&transfer_dir) {
             Ok(_) => (),
             Err(e) => {
                 return Err(Status::invalid_argument(format!(
-                    "couldn't create timestamped directory: {}",
+                    "couldn't create transfer directory: {}",
                     e
                 )));
             }
         }
 
         let complete_dir = self.controller.get_complete_dir();
-        let assign_name_request = request.into_inner();
 
         for sha256tonames in assign_name_request.sha256_to_filenames {
             for name in sha256tonames.names {

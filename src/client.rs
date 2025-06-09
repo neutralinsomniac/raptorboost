@@ -5,7 +5,7 @@ use crate::proto::SendFileDataResponse;
 use proto::FirstFileData;
 use proto::file_data::FirstOrData;
 use proto::raptor_boost_client::RaptorBoostClient;
-use proto::{AssignNamesRequest, AssignNamesResponse, FileData, FileStateResult, Sha256Filenames};
+use proto::{AssignNamesRequest, FileData, FileStateResult, Sha256Filenames};
 
 use crate::proto::{FileState, UploadFilesRequest};
 
@@ -89,7 +89,7 @@ fn send_file(
     host: &str,
     port: u16,
     file: &FilenameWithState,
-    force: bool,
+    force_unlock: bool,
     multibar: &mut MultiProgress,
 ) -> Result<(), SendFileError> {
     let file_size = File::open(&file.filename)
@@ -135,7 +135,7 @@ fn send_file(
             let fdata = FileData {
                 first_or_data: Some(FirstOrData::First(FirstFileData {
                     sha256sum,
-                    force,
+                    force: force_unlock,
                     data: vec![],
                 })),
             };
@@ -154,7 +154,7 @@ fn send_file(
                     FileData {
                         first_or_data: Some(FirstOrData::First(FirstFileData {
                             sha256sum: sha256sum.clone(),
-                            force,
+                            force: force_unlock,
                             data,
                         })),
                     }
@@ -226,12 +226,16 @@ pub struct MainError(String);
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
-    #[arg(long, short, action, help = "don't sort files by size")]
-    no_sort: bool,
     #[arg(long, short, default_value = "7272")]
     port: u16,
-    #[arg(long, short, action)]
-    force: bool,
+    #[arg(short, long)]
+    name: Option<String>,
+    #[arg(long, action, help = "don't sort files by size")]
+    no_sort: bool,
+    #[arg(long, action)]
+    force_unlock: bool,
+    #[arg(long, action, default_value = "false")]
+    force_name: bool,
     #[arg(index = 1)]
     host: String,
     #[arg(trailing_var_arg = true, index = 2)]
@@ -386,7 +390,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let truncated_filename = truncated_filename.display().to_string();
         filename_bar.set_message(truncated_filename);
 
-        match send_file(&args.host, args.port, &f, args.force, &mut multibar) {
+        match send_file(&args.host, args.port, &f, args.force_unlock, &mut multibar) {
             Ok(_) => {
                 num_files_sent += 1;
                 total_files_bar.inc(1)
@@ -429,10 +433,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match RaptorBoostClient::connect(format!("http://{}:{}", args.host, args.port)).await {
                 Ok(c) => c,
                 Err(e) => {
-                    return Err(Box::<dyn std::error::Error>::from(format!(
-                        "error connecting: {}",
-                        e
-                    )));
+                    return Err(e.to_string());
                 }
             };
 
@@ -447,15 +448,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     })
                     .collect(),
+                name: args.name,
+                force: match args.force_name {
+                    true => Some(true),
+                    false => None,
+                },
             }))
             .await
         {
             Ok(r) => r,
             Err(e) => {
-                return Err(Box::<dyn std::error::Error>::from(format!(
-                    "error uploading file list: {}",
-                    e
-                )));
+                return Err(e.message().to_string());
             }
         };
 
@@ -463,7 +466,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     });
 
-    println!("{:?}", assign_names_resp?);
+    match assign_names_resp {
+        Ok(_) => (),
+        Err(e) => println!("remote error assigning names: {}", e),
+    }
+
     println!("");
 
     if num_files_up_to_date != 0 {

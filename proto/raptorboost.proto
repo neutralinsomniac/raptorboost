@@ -63,7 +63,9 @@ message Sha256Filenames {
 }
 
 message AssignNamesRequest {
-  repeated Sha256Filenames sha256_to_filenames = 1;
+  optional string name = 1;
+  optional bool force = 2;
+  repeated Sha256Filenames sha256_to_filenames = 3;
 }
 
 enum AssignNameStatus {
