@@ -2,6 +2,8 @@ mod proto {
     tonic::include_proto!("raptorboost");
 }
 use crate::proto::SendFileDataResponse;
+use proto::FirstFileData;
+use proto::file_data::FirstOrData;
 use proto::raptor_boost_client::RaptorBoostClient;
 use proto::{AssignNamesRequest, AssignNamesResponse, FileData, FileStateResult, Sha256Filenames};
 
@@ -128,11 +130,10 @@ fn send_file(
 
         // we branch here to handle the case where a file iterator on an empty (or a partial file with 0 bytes left to transfer) wouldn't iterate
         let resp = if file_size - offset == 0 {
+            // stream expects an iterable, so we create one here to hold the single file data object we're about to send
             let mut vec_iter = Vec::new();
             let fdata = FileData {
-                sha256sum: Some(sha256sum),
-                data: vec![],
-                force,
+                first_or_data: Some(FirstOrData::First(FirstFileData { sha256sum, force })),
             };
 
             vec_iter.push(fdata);
@@ -147,15 +148,14 @@ fn send_file(
                 if first {
                     first = false;
                     FileData {
-                        sha256sum: Some(sha256sum.to_string()),
-                        data,
-                        force,
+                        first_or_data: Some(FirstOrData::First(FirstFileData {
+                            sha256sum: sha256sum.clone(),
+                            force,
+                        })),
                     }
                 } else {
                     FileData {
-                        sha256sum: None,
-                        data,
-                        force,
+                        first_or_data: Some(FirstOrData::Data(data)),
                     }
                 }
             });

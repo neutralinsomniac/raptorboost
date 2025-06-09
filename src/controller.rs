@@ -136,7 +136,7 @@ impl RaptorBoostController {
         };
 
         if force {
-            remove_file(&partial_lock_path);
+            let _ = remove_file(&partial_lock_path); // ignoring this because if it fails, the lock below will fail
         }
 
         let partial_lock = match LockFile::open(partial_lock_path.to_owned()) {

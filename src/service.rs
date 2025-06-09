@@ -4,6 +4,7 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use crate::controller::{self, RaptorBoostError};
+use crate::proto::file_data::FirstOrData;
 use crate::proto::raptor_boost_server::RaptorBoost;
 use crate::proto::{
     AssignNamesRequest, AssignNamesResponse, FileData, FileState, FileStateResult,
@@ -94,13 +95,15 @@ impl RaptorBoost for RaptorBoostService {
             return Err(Status::not_found("no data received?"));
         };
 
-        let Some(sha256sum) = first_file_data.sha256sum else {
-            return Err(Status::internal("first packet did not contain sha256sum"));
+        let Some(FirstOrData::First(first_file_data)) = first_file_data.first_or_data else {
+            return Err(Status::invalid_argument(
+                "first packet was actually not a first packet",
+            ));
         };
 
         let mut transfer_object = match self
             .controller
-            .start_transfer(&sha256sum, first_file_data.force)
+            .start_transfer(&first_file_data.sha256sum, first_file_data.force)
         {
             Ok(t) => t,
             Err(e) => match e {
@@ -116,22 +119,17 @@ impl RaptorBoost for RaptorBoostService {
             },
         };
 
-        // write initial data first
-        let total = first_file_data.data.len();
-        let mut num_written = 0;
-
-        while num_written < total {
-            num_written += transfer_object.write(&first_file_data.data)?;
-        }
-
         // now loop over remaining message stream
         while let Ok(message) = stream.message().await {
             match message {
-                Some(data) => {
-                    let total = data.data.len();
+                Some(data_obj) => {
+                    let Some(FirstOrData::Data(data)) = data_obj.first_or_data else {
+                        return Err(Status::invalid_argument("expected data packet"));
+                    };
+                    let total = data.len();
                     let mut num_written = 0;
                     while num_written < total {
-                        num_written += transfer_object.write(&data.data)?;
+                        num_written += transfer_object.write(&data)?;
                     }
                 }
                 None => break,
