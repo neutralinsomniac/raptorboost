@@ -161,12 +161,12 @@ impl RaptorBoost for RaptorBoostService {
         // convenience
         let now = Local::now();
 
-        let name_dir = self
+        let transfer_dir = self
             .controller
-            .get_name_dir()
+            .get_transfers_dir()
             .join(format!("{}", now.format("%Y-%m-%d_%H:%M:%S")));
 
-        match create_dir(&name_dir) {
+        match create_dir(&transfer_dir) {
             Ok(_) => (),
             Err(e) => {
                 return Err(Status::invalid_argument(format!(
@@ -197,12 +197,14 @@ impl RaptorBoost for RaptorBoostService {
                 let dir = path.parent().unwrap();
                 let file = path.file_name().unwrap();
 
-                let _ = create_dir_all(&name_dir.join(scoped_resolve(&name_dir, dir).unwrap()));
+                let _ =
+                    create_dir_all(&transfer_dir.join(scoped_resolve(&transfer_dir, dir).unwrap()));
 
                 let safe_target_sha256sum = &complete_dir
                     .join(scoped_resolve(&complete_dir, &sha256tonames.sha256sum).unwrap());
 
-                let safe_target_link_dir = &name_dir.join(scoped_resolve(&name_dir, dir).unwrap());
+                let safe_target_link_dir =
+                    &transfer_dir.join(scoped_resolve(&transfer_dir, dir).unwrap());
                 let safe_target_link =
                     &safe_target_link_dir.join(scoped_resolve(safe_target_link_dir, file).unwrap());
 
