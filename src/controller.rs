@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, remove_file},
     io::{self, ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
@@ -124,12 +124,20 @@ impl RaptorBoostController {
         })
     }
 
-    pub fn start_transfer(&self, sha256sum: &str) -> Result<RaptorBoostTransfer, RaptorBoostError> {
+    pub fn start_transfer(
+        &self,
+        sha256sum: &str,
+        force: bool,
+    ) -> Result<RaptorBoostTransfer, RaptorBoostError> {
         // lock partial
         let partial_lock_path = match scoped_join(self.get_lock_dir(), &sha256sum) {
             Ok(p) => p,
             Err(_) => return Err(RaptorBoostError::PathSanitization(sha256sum.to_string())),
         };
+
+        if force {
+            remove_file(&partial_lock_path);
+        }
 
         let partial_lock = match LockFile::open(partial_lock_path.to_owned()) {
             Ok(l) => l,

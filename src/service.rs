@@ -98,7 +98,10 @@ impl RaptorBoost for RaptorBoostService {
             return Err(Status::internal("first packet did not contain sha256sum"));
         };
 
-        let mut transfer_object = match self.controller.start_transfer(&sha256sum) {
+        let mut transfer_object = match self
+            .controller
+            .start_transfer(&sha256sum, first_file_data.force)
+        {
             Ok(t) => t,
             Err(e) => match e {
                 RaptorBoostError::LockFailure => return Err(Status::unavailable("couldn't lock!")),

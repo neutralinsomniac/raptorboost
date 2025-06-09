@@ -36,7 +36,8 @@ message UploadFilesResponse {
 
 message FileData {
   optional string sha256sum = 1;
-  bytes data = 2;
+  bool force = 2;
+  bytes data = 3;
 }
 
 enum SendFileDataStatus {

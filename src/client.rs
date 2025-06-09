@@ -87,6 +87,7 @@ fn send_file(
     host: &str,
     port: u16,
     file: &FilenameWithState,
+    force: bool,
     multibar: &mut MultiProgress,
 ) -> Result<(), SendFileError> {
     let file_size = File::open(&file.filename)
@@ -125,12 +126,13 @@ fn send_file(
 
         let bar = multibar.add(bar);
 
-        // we fork here to handle the case where a file iterator on an empty (or a partial file with 0 bytes left to transfer) wouldn't iterate
+        // we branch here to handle the case where a file iterator on an empty (or a partial file with 0 bytes left to transfer) wouldn't iterate
         let resp = if file_size - offset == 0 {
             let mut vec_iter = Vec::new();
             let fdata = FileData {
                 sha256sum: Some(sha256sum),
                 data: vec![],
+                force,
             };
 
             vec_iter.push(fdata);
@@ -147,11 +149,13 @@ fn send_file(
                     FileData {
                         sha256sum: Some(sha256sum.to_string()),
                         data,
+                        force,
                     }
                 } else {
                     FileData {
                         sha256sum: None,
                         data,
+                        force,
                     }
                 }
             });
@@ -221,6 +225,8 @@ struct Args {
     no_sort: bool,
     #[arg(long, short, default_value = "7272")]
     port: u16,
+    #[arg(long, short, action)]
+    force: bool,
     #[arg(index = 1)]
     host: String,
     #[arg(trailing_var_arg = true, index = 2)]
@@ -375,7 +381,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let truncated_filename = truncated_filename.display().to_string();
         filename_bar.set_message(truncated_filename);
 
-        match send_file(&args.host, args.port, &f, &mut multibar) {
+        match send_file(&args.host, args.port, &f, args.force, &mut multibar) {
             Ok(_) => {
                 num_files_sent += 1;
                 total_files_bar.inc(1)
