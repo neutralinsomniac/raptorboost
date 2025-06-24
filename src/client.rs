@@ -2,10 +2,10 @@ mod proto {
     tonic::include_proto!("raptorboost");
 }
 use crate::proto::SendFileDataResponse;
-use proto::FirstFileData;
 use proto::file_data::FirstOrData;
 use proto::raptor_boost_client::RaptorBoostClient;
 use proto::{AssignNamesRequest, FileData, FileStateResult, Sha256Filenames};
+use proto::{FirstFileData, SendFileDataStatus};
 
 use crate::proto::{FileState, UploadFilesRequest};
 
@@ -85,90 +85,103 @@ enum SendFileError {
     #[error("unspecified error")]
     UnspecifiedError,
 }
-fn send_file(
+fn send_files<'a>(
     host: &str,
     port: u16,
-    file: &FilenameWithState,
+    files: impl IntoIterator<Item = FilenameWithState>,
     force_unlock: bool,
     multibar: &mut MultiProgress,
 ) -> Result<(), SendFileError> {
-    let file_size = File::open(&file.filename)
-        .map_err(|source| SendFileError::OpenError { source })?
-        .metadata()?
-        .len();
-
     let rt = Runtime::new()?;
-
-    let filename = file.filename.to_owned();
-    let offset = file.offset;
-    let sha256sum = file.sha256sum.to_owned();
 
     let resp: Result<Response<SendFileDataResponse>, SendFileError> = rt.block_on(async {
         let mut client = RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await?;
 
-        let mut f = File::open(&filename)?;
+        let filename_bar = multibar.add(
+            ProgressBar::new(0)
+                .with_style(ProgressStyle::with_template("sending {msg}...").unwrap()),
+        );
 
-        f.seek(SeekFrom::Start(offset))
-            .map_err(|source| SendFileError::SeekError { source })?;
+        for file in files {
+            let file_size = File::open(&file.filename)
+                .map_err(|source| SendFileError::OpenError { source })?
+                .metadata()?
+                .len();
 
-        let mut first = true;
-        let freader = BufReader::new(f);
+            let filename = file.filename.to_owned();
+            let offset = file.offset;
+            let sha256sum = file.sha256sum.to_owned();
 
-        let mut pos: u64 = offset;
-        let bar = ProgressBar::new(file_size - offset).with_style(
-            ProgressStyle::with_template(
-                "[{elapsed_precise}] \
+            let mut f = File::open(&filename)?;
+            f.seek(SeekFrom::Start(offset))
+                .map_err(|source| SendFileError::SeekError { source })?;
+
+            let mut first = true;
+            let freader = BufReader::new(f);
+
+            let mut pos: u64 = offset;
+            let bar = ProgressBar::new(file_size - offset).with_style(
+                ProgressStyle::with_template(
+                    "[{elapsed_precise}] \
                  [eta: {eta_precise}] \
                  {wide_bar} \
                  [{decimal_bytes:>7}/{decimal_total_bytes:7}] \
                  [{decimal_bytes_per_sec}]",
-            )
-            .unwrap(),
-        );
+                )
+                .unwrap(),
+            );
+            let bar = multibar.add(bar);
 
-        let bar = multibar.add(bar);
+            let pathbuf = PathBuf::from_str(&file.filename).unwrap();
+            let truncated_filename = spat::shorten(pathbuf);
+            let truncated_filename = truncated_filename.display().to_string();
+            filename_bar.set_message(truncated_filename);
 
-        // we branch here to handle the case where a file iterator on an empty (or a partial file with 0 bytes left to transfer) wouldn't iterate
-        let resp = if file_size - offset == 0 {
-            // stream expects an iterable, so we create one here to hold the single file data object we're about to send
-            let mut vec_iter = Vec::new();
-            let fdata = FileData {
-                first_or_data: Some(FirstOrData::First(FirstFileData {
-                    sha256sum,
-                    force: force_unlock,
-                    data: vec![],
-                })),
+            // we branch here to handle the case where a file iterator on an empty (or a partial file with 0 bytes left to transfer) wouldn't iterate
+            let resp = if file_size - offset == 0 {
+                // stream expects an iterable, so we create one here to hold the single file data object we're about to send
+                let mut vec_iter = Vec::new();
+                let fdata = FileData {
+                    first_or_data: Some(FirstOrData::First(FirstFileData {
+                        sha256sum,
+                        force: force_unlock,
+                        data: vec![],
+                    })),
+                };
+
+                vec_iter.push(fdata);
+
+                let request = Request::new(tokio_stream::iter(vec_iter));
+                client.send_file_data(request).await?
+            } else {
+                let file_iter = freader.iter_chunks(8192).map(move |d| {
+                    bar.set_position(pos - offset);
+                    let data = d.unwrap();
+                    pos += data.len() as u64;
+                    if first {
+                        first = false;
+                        FileData {
+                            first_or_data: Some(FirstOrData::First(FirstFileData {
+                                sha256sum: sha256sum.clone(),
+                                force: force_unlock,
+                                data,
+                            })),
+                        }
+                    } else {
+                        FileData {
+                            first_or_data: Some(FirstOrData::Data(data)),
+                        }
+                    }
+                });
+                let request = Request::new(tokio_stream::iter(file_iter));
+                client.send_file_data(request).await?
             };
-
-            vec_iter.push(fdata);
-
-            let request = Request::new(tokio_stream::iter(vec_iter));
-            client.send_file_data(request).await?
-        } else {
-            let file_iter = freader.iter_chunks(8192).map(move |d| {
-                bar.set_position(pos - offset);
-                let data = d.unwrap();
-                pos += data.len() as u64;
-                if first {
-                    first = false;
-                    FileData {
-                        first_or_data: Some(FirstOrData::First(FirstFileData {
-                            sha256sum: sha256sum.clone(),
-                            force: force_unlock,
-                            data,
-                        })),
-                    }
-                } else {
-                    FileData {
-                        first_or_data: Some(FirstOrData::Data(data)),
-                    }
-                }
-            });
-            let request = Request::new(tokio_stream::iter(file_iter));
-            client.send_file_data(request).await?
-        };
-
-        Ok(resp)
+            println!("{:?}", resp.into_inner());
+            break;
+        }
+        Ok(Response::new(SendFileDataResponse {
+            status: SendFileDataStatus::SendfiledatastatusComplete.into(),
+        }))
     });
 
     match resp?.into_inner().status() {
@@ -343,7 +356,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut num_files_up_to_date = 0;
-    let mut num_files_sent = 0;
+    // let mut num_files_sent = 0;
     let mut num_files_to_send = 0;
     for file_state in &file_states {
         match file_state.state() {
@@ -374,55 +387,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if num_files_to_send > 0 {
         println!("[+] sending {} files...", num_files_to_send);
     }
-    let mut num_send_errors = 0;
+    // let mut num_send_errors = 0;
     let total_files_bar = multibar.add(ProgressBar::new(num_files_to_send).with_style(
         ProgressStyle::with_template("[{elapsed_precise}] {wide_bar} {pos:>7}/{len:7}")?,
     ));
     total_files_bar.enable_steady_tick(Duration::new(0, 100000000)); // 10 times per second
     total_files_bar.set_position(0);
-    let filename_bar = multibar.add(
-        ProgressBar::new(0).with_style(ProgressStyle::with_template("sending {msg}...").unwrap()),
-    );
 
-    for f in filenames_with_state {
-        let pathbuf = PathBuf::from_str(&f.filename).unwrap();
-        let truncated_filename = spat::shorten(pathbuf);
-        let truncated_filename = truncated_filename.display().to_string();
-        filename_bar.set_message(truncated_filename);
+    send_files(
+        &args.host,
+        args.port,
+        filenames_with_state,
+        args.force_unlock,
+        &mut multibar,
+    )?;
 
-        match send_file(&args.host, args.port, &f, args.force_unlock, &mut multibar) {
-            Ok(_) => {
-                num_files_sent += 1;
-                total_files_bar.inc(1)
-            }
-            Err(e) => match e {
-                SendFileError::OpenError { source } => {
-                    num_send_errors += 1;
-                    println!("error opening file '{}': {}", f.filename, source)
-                }
-                SendFileError::OtherError(error) => {
-                    num_send_errors += 1;
-                    println!("error occurred with file '{}': {}", f.filename, error)
-                }
-                SendFileError::ConnectError(error) => {
-                    num_send_errors += 1;
-                    println!("connection error: {}", error)
-                }
-                SendFileError::SeekError { source } => {
-                    num_send_errors += 1;
-                    println!("error occurred with file '{}': {}", f.filename, source)
-                }
-                SendFileError::ResponseError(status) => {
-                    num_send_errors += 1;
-                    println!("response error for '{}': {}", f.filename, status)
-                }
-                SendFileError::ChecksumMismatch => println!("checksum mismatch"),
-                SendFileError::UnspecifiedError => println!("unspecified error"),
-            },
-        }
-    }
-
-    drop(filename_bar);
     drop(total_files_bar);
 
     // 5: send names
@@ -477,11 +456,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{} files were already up to date", num_files_up_to_date);
     }
 
-    println!("{} files were sent", num_files_sent);
+    // println!("{} files were sent", num_files_sent);
 
-    if num_send_errors > 0 {
-        println!("couldn't send {} files due to errors", num_send_errors)
-    }
+    // if num_send_errors > 0 {
+    //     println!("couldn't send {} files due to errors", num_send_errors)
+    // }
 
     Ok(())
 }
