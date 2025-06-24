@@ -2,10 +2,9 @@ mod proto {
     tonic::include_proto!("raptorboost");
 }
 use crate::proto::SendFileDataResponse;
-use proto::file_data::FirstOrData;
+use proto::SendFileDataStatus;
 use proto::raptor_boost_client::RaptorBoostClient;
 use proto::{AssignNamesRequest, FileData, FileStateResult, Sha256Filenames};
-use proto::{FirstFileData, SendFileDataStatus};
 
 use crate::proto::{FileState, UploadFilesRequest};
 
@@ -102,6 +101,8 @@ fn send_files<'a>(
                 .with_style(ProgressStyle::with_template("sending {msg}...").unwrap()),
         );
 
+        // TODO request = create iterator over files
+        //
         for file in files {
             let file_size = File::open(&file.filename)
                 .map_err(|source| SendFileError::OpenError { source })?
@@ -139,14 +140,15 @@ fn send_files<'a>(
 
             // we branch here to handle the case where a file iterator on an empty (or a partial file with 0 bytes left to transfer) wouldn't iterate
             let resp = if file_size - offset == 0 {
+                eprintln!("empty data");
                 // stream expects an iterable, so we create one here to hold the single file data object we're about to send
                 let mut vec_iter = Vec::new();
                 let fdata = FileData {
-                    first_or_data: Some(FirstOrData::First(FirstFileData {
-                        sha256sum,
-                        force: force_unlock,
-                        data: vec![],
-                    })),
+                    first: true,
+                    last: true,
+                    sha256sum: Some(sha256sum),
+                    force: Some(force_unlock),
+                    data: vec![],
                 };
 
                 vec_iter.push(fdata);
@@ -154,6 +156,7 @@ fn send_files<'a>(
                 let request = Request::new(tokio_stream::iter(vec_iter));
                 client.send_file_data(request).await?
             } else {
+                eprintln!("\n\n\n\nsending data");
                 let file_iter = freader.iter_chunks(8192).map(move |d| {
                     bar.set_position(pos - offset);
                     let data = d.unwrap();
@@ -161,15 +164,19 @@ fn send_files<'a>(
                     if first {
                         first = false;
                         FileData {
-                            first_or_data: Some(FirstOrData::First(FirstFileData {
-                                sha256sum: sha256sum.clone(),
-                                force: force_unlock,
-                                data,
-                            })),
+                            first: true,
+                            last: file_size - pos > 0,
+                            sha256sum: Some(sha256sum.clone()),
+                            force: Some(force_unlock),
+                            data,
                         }
                     } else {
                         FileData {
-                            first_or_data: Some(FirstOrData::Data(data)),
+                            first: false,
+                            last: file_size - pos > 0,
+                            sha256sum: None,
+                            force: None,
+                            data,
                         }
                     }
                 });
@@ -177,7 +184,6 @@ fn send_files<'a>(
                 client.send_file_data(request).await?
             };
             println!("{:?}", resp.into_inner());
-            break;
         }
         Ok(Response::new(SendFileDataResponse {
             status: SendFileDataStatus::SendfiledatastatusComplete.into(),

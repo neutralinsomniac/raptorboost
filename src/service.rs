@@ -4,7 +4,6 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use crate::controller::{self, RaptorBoostError, RaptorBoostTransfer};
-use crate::proto::file_data::FirstOrData;
 use crate::proto::raptor_boost_server::RaptorBoost;
 use crate::proto::{
     AssignNamesRequest, AssignNamesResponse, FileData, FileState, FileStateResult,
@@ -92,86 +91,76 @@ impl RaptorBoost for RaptorBoostService {
     ) -> Result<Response<SendFileDataResponse>, Status> {
         let mut stream = request.into_inner();
 
-        loop {
+        let mut transfer_object: RaptorBoostTransfer;
+
+        'next_file: loop {
+            dbg!("looping");
             let Some(file_data) = stream.message().await? else {
-                return Err(Status::invalid_argument("expected first data packet"));
+                return Err(Status::invalid_argument("no data"));
             };
 
-            let mut transfer_object: RaptorBoostTransfer;
+            if file_data.first {
+                // verify sha256sum exists
+                let Some(sha256sum) = file_data.sha256sum else {
+                    return Err(Status::invalid_argument(
+                        "need sha256sum in first data packet",
+                    ));
+                };
 
-            match file_data.first_or_data {
-                Some(f) => match f {
-                    FirstOrData::First(first_file_data) => {
-                        transfer_object = match self
-                            .controller
-                            .start_transfer(&first_file_data.sha256sum, first_file_data.force)
-                        {
-                            Ok(t) => t,
-                            Err(e) => match e {
-                                RaptorBoostError::LockFailure => {
-                                    return Err(Status::unavailable("couldn't lock!"));
-                                }
-                                RaptorBoostError::PathSanitization(e) => {
-                                    return Err(Status::invalid_argument(e.to_string()));
-                                }
-                                RaptorBoostError::OtherError(e) => return Err(Status::internal(e)),
-                                RaptorBoostError::TransferAlreadyComplete => {
-                                    return Err(Status::already_exists("already exists"));
-                                }
-                                _ => return Err(Status::internal("unexpected error occurred")),
-                            },
-                        };
-                        let total = first_file_data.data.len();
-                        let mut num_written = 0;
+                let force = match file_data.force {
+                    Some(t) => t,
+                    None => false,
+                };
 
-                        while num_written < total {
-                            num_written +=
-                                transfer_object.write(&first_file_data.data[num_written..])?;
+                transfer_object = match self.controller.start_transfer(&sha256sum, force) {
+                    Ok(t) => t,
+                    Err(e) => match e {
+                        RaptorBoostError::LockFailure => {
+                            return Err(Status::unavailable("couldn't lock!"));
                         }
-                    }
-                    FirstOrData::Data(_) | FirstOrData::End(_) => {
-                        return Err(Status::invalid_argument("expected first data packet"));
-                    }
-                },
-                None => return Err(Status::invalid_argument("stream returned no data")),
+                        RaptorBoostError::PathSanitization(e) => {
+                            return Err(Status::invalid_argument(e.to_string()));
+                        }
+                        RaptorBoostError::OtherError(e) => return Err(Status::internal(e)),
+                        RaptorBoostError::TransferAlreadyComplete => {
+                            return Err(Status::already_exists("already exists"));
+                        }
+                        _ => return Err(Status::internal("unexpected error occurred")),
+                    },
+                }
+            } else {
+                return Err(Status::invalid_argument("first packet not marked as first"));
+            }
+
+            // write this first file chunk
+            let total = file_data.data.len();
+            let mut num_written = 0;
+
+            while num_written < total {
+                num_written += transfer_object.write(&file_data.data[num_written..])?;
+            }
+
+            if file_data.last {
+                transfer_object.complete();
+                continue;
             }
 
             // now loop over remaining message stream
-            while let Some(message) = stream.message().await? {
-                match message.first_or_data {
-                    Some(f) => match f {
-                        FirstOrData::First(_) => {
-                            return Err(Status::invalid_argument("got unexpected start packet"));
-                        }
-                        FirstOrData::Data(data) => {
-                            let total = data.len();
-                            let mut num_written = 0;
+            while let Some(file_data) = stream.message().await? {
+                let total = file_data.data.len();
+                let mut num_written = 0;
 
-                            while num_written < total {
-                                num_written += transfer_object.write(&data[num_written..])?;
-                            }
-                        }
-                        FirstOrData::End(_) => break,
-                    },
+                while num_written < total {
+                    num_written += transfer_object.write(&file_data.data[num_written..])?;
+                }
 
-                    None => todo!("can this hit?"),
+                if file_data.last {
+                    transfer_object.complete();
+                    continue 'next_file;
                 }
             }
 
             // let mut resp = SendFileDataResponse::default();
-
-            match transfer_object.complete() {
-                Ok(_) => continue,
-                Err(e) => match e {
-                    RaptorBoostError::RenameError(e) => {
-                        return Err(Status::internal(e));
-                    }
-                    RaptorBoostError::ChecksumMismatch => {
-                        return Err(Status::data_loss("checksum mismatch!"));
-                    }
-                    _ => return Err(Status::internal("unexpected error occurred")),
-                },
-            }
         }
 
         // Ok(Response::new(SendFileDataResponse {

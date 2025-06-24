@@ -34,17 +34,12 @@ message UploadFilesResponse {
   repeated FileState file_states = 1;
 }
 
-message FirstFileData {
-  string sha256sum = 1;
-  bool force = 2;
-  bytes data = 3;
-}
-
 message FileData {
-  oneof first_or_data {
-    FirstFileData first = 1;
-    bytes data = 2;
-  }
+  bytes data = 1;
+  bool first = 2;
+  bool last = 3;
+  optional string sha256sum = 4;
+  optional bool force = 5;
 }
 
 enum SendFileDataStatus {
