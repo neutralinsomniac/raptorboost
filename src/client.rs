@@ -21,6 +21,7 @@ use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use ring;
 use spat;
+use std::sync::mpsc;
 use thiserror::Error;
 use tokio::runtime::Runtime;
 use tonic::{Request, Response};
@@ -84,14 +85,16 @@ enum SendFileError {
     #[error("unspecified error")]
     UnspecifiedError,
 }
-fn send_files<'a>(
+fn send_files(
     host: &str,
     port: u16,
-    files: impl IntoIterator<Item = FilenameWithState>,
+    files: Vec<FilenameWithState>,
     force_unlock: bool,
-    multibar: &mut MultiProgress,
+    multibar: MultiProgress,
 ) -> Result<(), SendFileError> {
     let rt = Runtime::new()?;
+
+    let num_files_to_send = files.len();
 
     let resp: Result<Response<SendFileDataResponse>, SendFileError> = rt.block_on(async {
         let mut client = RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await?;
@@ -101,90 +104,108 @@ fn send_files<'a>(
                 .with_style(ProgressStyle::with_template("sending {msg}...").unwrap()),
         );
 
-        // TODO request = create iterator over files
-        //
-        for file in files {
-            let file_size = File::open(&file.filename)
-                .map_err(|source| SendFileError::OpenError { source })?
-                .metadata()?
-                .len();
+        let total_files_bar = multibar.add(
+            ProgressBar::new(num_files_to_send.try_into().unwrap()).with_style(
+                ProgressStyle::with_template("[{elapsed_precise}] {wide_bar} {pos:>7}/{len:7}")
+                    .unwrap(),
+            ),
+        );
+        total_files_bar.enable_steady_tick(Duration::from_millis(100)); // 10 times per second
+        total_files_bar.set_position(0);
 
-            let filename = file.filename.to_owned();
-            let offset = file.offset;
-            let sha256sum = file.sha256sum.to_owned();
+        let (tx, rx) = mpsc::sync_channel::<FileData>(100);
 
-            let mut f = File::open(&filename)?;
-            f.seek(SeekFrom::Start(offset))
-                .map_err(|source| SendFileError::SeekError { source })?;
+        tokio::spawn(async move {
+            for file in files {
+                total_files_bar.inc(1);
+                let file_size = File::open(&file.filename)
+                    .map_err(|source| SendFileError::OpenError { source })
+                    .unwrap()
+                    .metadata()
+                    .unwrap()
+                    .len();
 
-            let mut first = true;
-            let freader = BufReader::new(f);
+                let filename = file.filename.to_owned();
+                let offset = file.offset;
+                let sha256sum = file.sha256sum.to_owned();
 
-            let mut pos: u64 = offset;
-            let bar = ProgressBar::new(file_size - offset).with_style(
-                ProgressStyle::with_template(
-                    "[{elapsed_precise}] \
+                let mut f = File::open(&filename).unwrap();
+                f.seek(SeekFrom::Start(offset))
+                    .map_err(|source| SendFileError::SeekError { source })
+                    .unwrap();
+
+                let mut first = true;
+                let freader = BufReader::new(f);
+
+                let mut pos: u64 = offset;
+                let bar = ProgressBar::new(file_size - offset).with_style(
+                    ProgressStyle::with_template(
+                        "[{elapsed_precise}] \
                  [eta: {eta_precise}] \
                  {wide_bar} \
                  [{decimal_bytes:>7}/{decimal_total_bytes:7}] \
                  [{decimal_bytes_per_sec}]",
-                )
-                .unwrap(),
-            );
-            let bar = multibar.add(bar);
+                    )
+                    .unwrap(),
+                );
 
-            let pathbuf = PathBuf::from_str(&file.filename).unwrap();
-            let truncated_filename = spat::shorten(pathbuf);
-            let truncated_filename = truncated_filename.display().to_string();
-            filename_bar.set_message(truncated_filename);
+                let bar = multibar.add(bar);
 
-            // we branch here to handle the case where a file iterator on an empty (or a partial file with 0 bytes left to transfer) wouldn't iterate
-            let resp = if file_size - offset == 0 {
-                eprintln!("empty data");
-                // stream expects an iterable, so we create one here to hold the single file data object we're about to send
-                let mut vec_iter = Vec::new();
-                let fdata = FileData {
-                    first: true,
-                    last: true,
-                    sha256sum: Some(sha256sum),
-                    force: Some(force_unlock),
-                    data: vec![],
-                };
+                let pathbuf = PathBuf::from_str(&file.filename).unwrap();
+                let truncated_filename = spat::shorten(pathbuf);
+                let truncated_filename = truncated_filename.display().to_string();
+                filename_bar.set_message(truncated_filename);
 
-                vec_iter.push(fdata);
+                // we branch here to handle the case where a file iterator on an empty file (or a partial file with 0 bytes left to transfer) wouldn't iterate
+                let resp = if file_size - offset == 0 {
+                    // stream expects an iterable, so we create one here to hold the single file data object we're about to send
+                    let fdata = FileData {
+                        first: true,
+                        last: true,
+                        sha256sum: Some(sha256sum),
+                        force: Some(force_unlock),
+                        data: vec![],
+                    };
 
-                let request = Request::new(tokio_stream::iter(vec_iter));
-                client.send_file_data(request).await?
-            } else {
-                eprintln!("\n\n\n\nsending data");
-                let file_iter = freader.iter_chunks(8192).map(move |d| {
-                    bar.set_position(pos - offset);
-                    let data = d.unwrap();
-                    pos += data.len() as u64;
-                    if first {
-                        first = false;
-                        FileData {
-                            first: true,
-                            last: file_size - pos > 0,
-                            sha256sum: Some(sha256sum.clone()),
-                            force: Some(force_unlock),
-                            data,
-                        }
-                    } else {
-                        FileData {
-                            first: false,
-                            last: file_size - pos > 0,
-                            sha256sum: None,
-                            force: None,
-                            data,
-                        }
+                    tx.send(fdata);
+                } else {
+                    for d in freader.iter_chunks(8192) {
+                        bar.set_position(pos - offset);
+                        let data = d.unwrap();
+                        pos += data.len() as u64;
+                        let fdata = if first {
+                            first = false;
+                            FileData {
+                                first: true,
+                                last: file_size == pos,
+                                sha256sum: Some(sha256sum.clone()),
+                                force: Some(force_unlock),
+                                data,
+                            }
+                        } else {
+                            FileData {
+                                first: false,
+                                last: file_size == pos,
+                                sha256sum: None,
+                                force: None,
+                                data,
+                            }
+                        };
+                        tx.send(fdata);
                     }
-                });
-                let request = Request::new(tokio_stream::iter(file_iter));
-                client.send_file_data(request).await?
-            };
-            println!("{:?}", resp.into_inner());
+                };
+            }
+        });
+
+        let request = Request::new(tokio_stream::iter(rx));
+
+        let resp = client.send_file_data(request).await;
+
+        match resp {
+            Err(e) => println!("err: {}", e.to_string()),
+            _ => (),
         }
+
         Ok(Response::new(SendFileDataResponse {
             status: SendFileDataStatus::SendfiledatastatusComplete.into(),
         }))
@@ -310,7 +331,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sha256_to_filenames = HashMap::new();
     let mut sorted_sha256es = Vec::new();
     println!("[+] calculating checksums...");
-    let mut multibar = MultiProgress::new();
+    let multibar = MultiProgress::new();
     let bar = multibar.add(ProgressBar::new(sorted_files.len().try_into().unwrap()));
     for filename in sorted_files {
         bar.tick(); // show the bar even if the first file takes a while to checksum
@@ -373,20 +394,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ok, we have our filename<->hash mapping and our hash<->filestate mapping, combine them
-    let filenames_with_state = file_states.iter().filter_map(|file_state| {
-        if file_state.state() == FileStateResult::FilestateresultComplete {
-            None
-        } else {
-            Some(FilenameWithState {
-                filename: filename_to_sha256es
-                    .get(&file_state.sha256sum)
-                    .unwrap()
-                    .to_string(),
-                sha256sum: file_state.sha256sum.to_owned(),
-                offset: file_state.offset(),
-            })
-        }
-    });
+    let filenames_with_state: Vec<FilenameWithState> = file_states
+        .iter()
+        .filter_map(move |file_state| {
+            if file_state.state() == FileStateResult::FilestateresultComplete {
+                None
+            } else {
+                Some(FilenameWithState {
+                    filename: filename_to_sha256es
+                        .get(&file_state.sha256sum)
+                        .unwrap()
+                        .to_string(),
+                    sha256sum: file_state.sha256sum.to_owned(),
+                    offset: file_state.offset(),
+                })
+            }
+        })
+        .collect();
 
     // 5: upload actual file data
     // doing this so we don't have to collect() the above iterator
@@ -394,21 +418,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("[+] sending {} files...", num_files_to_send);
     }
     // let mut num_send_errors = 0;
-    let total_files_bar = multibar.add(ProgressBar::new(num_files_to_send).with_style(
-        ProgressStyle::with_template("[{elapsed_precise}] {wide_bar} {pos:>7}/{len:7}")?,
-    ));
-    total_files_bar.enable_steady_tick(Duration::new(0, 100000000)); // 10 times per second
-    total_files_bar.set_position(0);
 
     send_files(
         &args.host,
         args.port,
         filenames_with_state,
         args.force_unlock,
-        &mut multibar,
+        multibar,
     )?;
-
-    drop(total_files_bar);
 
     // 5: send names
     println!("[+] updating filenames...");

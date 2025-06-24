@@ -7,8 +7,8 @@ use crate::controller::{self, RaptorBoostError, RaptorBoostTransfer};
 use crate::proto::raptor_boost_server::RaptorBoost;
 use crate::proto::{
     AssignNamesRequest, AssignNamesResponse, FileData, FileState, FileStateResult,
-    GetVersionRequest, GetVersionResponse, SendFileDataResponse, UploadFilesRequest,
-    UploadFilesResponse,
+    GetVersionRequest, GetVersionResponse, SendFileDataResponse, SendFileDataStatus,
+    UploadFilesRequest, UploadFilesResponse,
 };
 
 use chrono::Local;
@@ -94,9 +94,10 @@ impl RaptorBoost for RaptorBoostService {
         let mut transfer_object: RaptorBoostTransfer;
 
         'next_file: loop {
-            dbg!("looping");
             let Some(file_data) = stream.message().await? else {
-                return Err(Status::invalid_argument("no data"));
+                return Ok(Response::new(SendFileDataResponse {
+                    status: SendFileDataStatus::SendfiledatastatusComplete.into(),
+                }));
             };
 
             if file_data.first {
@@ -141,7 +142,10 @@ impl RaptorBoost for RaptorBoostService {
             }
 
             if file_data.last {
-                transfer_object.complete();
+                match transfer_object.complete() {
+                    Ok(_) => (),
+                    Err(e) => println!("error: {}", e.to_string()),
+                }
                 continue;
             }
 
@@ -155,17 +159,14 @@ impl RaptorBoost for RaptorBoostService {
                 }
 
                 if file_data.last {
-                    transfer_object.complete();
+                    match transfer_object.complete() {
+                        Ok(_) => (),
+                        Err(e) => println!("error: {}", e.to_string()),
+                    }
                     continue 'next_file;
                 }
             }
-
-            // let mut resp = SendFileDataResponse::default();
         }
-
-        // Ok(Response::new(SendFileDataResponse {
-        //     status: SendFileDataStatus::SendfiledatastatusComplete.into(),
-        // }))
     }
 
     async fn assign_names(
