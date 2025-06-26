@@ -115,6 +115,8 @@ fn send_files(
 
         let (tx, rx) = mpsc::sync_channel::<FileData>(100);
 
+        let mut num_files_sent = 0;
+
         tokio::spawn(async move {
             for file in files {
                 total_files_bar.inc(1);
@@ -157,7 +159,7 @@ fn send_files(
                 filename_bar.set_message(truncated_filename);
 
                 // we branch here to handle the case where a file iterator on an empty file (or a partial file with 0 bytes left to transfer) wouldn't iterate
-                let resp = if file_size - offset == 0 {
+                if file_size - offset == 0 {
                     // stream expects an iterable, so we create one here to hold the single file data object we're about to send
                     let fdata = FileData {
                         first: true,
@@ -194,6 +196,7 @@ fn send_files(
                         tx.send(fdata);
                     }
                 };
+                num_files_sent += 1;
             }
         });
 
@@ -202,15 +205,17 @@ fn send_files(
         let resp = client.send_file_data(request).await;
 
         match resp {
-            Err(e) => println!("err: {}", e.to_string()),
-            _ => (),
+            Err(e) => {
+                // grpc error
+                println!("err: {}", e.to_string());
+                return Err(SendFileError::UnspecifiedError);
+            }
+            Ok(r) => return Ok(r),
         }
-
-        Ok(Response::new(SendFileDataResponse {
-            status: SendFileDataStatus::SendfiledatastatusComplete.into(),
-        }))
     });
 
+    // errors here are specific to our proto
+    // TODO: make checksum error a grpc error?
     match resp?.into_inner().status() {
         proto::SendFileDataStatus::SendfiledatastatusUnspecified => {
             eprintln!("\runspecified error occurred");
@@ -383,7 +388,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut num_files_up_to_date = 0;
-    // let mut num_files_sent = 0;
     let mut num_files_to_send = 0;
     for file_state in &file_states {
         match file_state.state() {
