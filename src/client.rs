@@ -104,22 +104,48 @@ fn send_files(
                 .with_style(ProgressStyle::with_template("sending {msg}...").unwrap()),
         );
 
-        let total_files_bar = multibar.add(
-            ProgressBar::new(num_files_to_send.try_into().unwrap()).with_style(
-                ProgressStyle::with_template("[{elapsed_precise}] {wide_bar} {pos:>7}/{len:7}")
-                    .unwrap(),
-            ),
-        );
-        total_files_bar.enable_steady_tick(Duration::from_millis(100)); // 10 times per second
-        total_files_bar.set_position(0);
+        // let total_files_bar = multibar.add(
+        //     ProgressBar::new(num_files_to_send.try_into().unwrap()).with_style(
+        //         ProgressStyle::with_template("[{elapsed_precise}] {wide_bar} {pos:>7}/{len:7}")
+        //             .unwrap(),
+        //     ),
+        // );
+        // total_files_bar.enable_steady_tick(Duration::from_millis(100)); // 10 times per second
+        // total_files_bar.set_position(0);
 
-        let (tx, rx) = mpsc::sync_channel::<FileData>(100);
+        let (tx, rx) = mpsc::sync_channel::<FileData>(1);
 
         let mut num_files_sent = 0;
 
+        let total_file_size = files
+            .iter()
+            .map(|f| {
+                File::open(&f.filename)
+                    .map_err(|source| SendFileError::OpenError { source })
+                    .unwrap()
+                    .metadata()
+                    .unwrap()
+                    .len()
+                    - f.offset
+            })
+            .sum();
+
+        let bar = ProgressBar::new(total_file_size).with_style(
+            ProgressStyle::with_template(
+                "[{elapsed_precise}] \
+                 [eta: {eta_precise}] \
+                 {wide_bar} \
+                 [{decimal_bytes:>7}/{decimal_total_bytes:7}] \
+                 [{decimal_bytes_per_sec}]",
+            )
+            .unwrap(),
+        );
+
+        let total_file_size_bar = multibar.add(bar);
+
         tokio::spawn(async move {
             for file in files {
-                total_files_bar.inc(1);
+                // total_files_bar.inc(1);
                 let file_size = File::open(&file.filename)
                     .map_err(|source| SendFileError::OpenError { source })
                     .unwrap()
@@ -140,18 +166,6 @@ fn send_files(
                 let freader = BufReader::new(f);
 
                 let mut pos: u64 = offset;
-                let bar = ProgressBar::new(file_size - offset).with_style(
-                    ProgressStyle::with_template(
-                        "[{elapsed_precise}] \
-                 [eta: {eta_precise}] \
-                 {wide_bar} \
-                 [{decimal_bytes:>7}/{decimal_total_bytes:7}] \
-                 [{decimal_bytes_per_sec}]",
-                    )
-                    .unwrap(),
-                );
-
-                let bar = multibar.add(bar);
 
                 let pathbuf = PathBuf::from_str(&file.filename).unwrap();
                 let truncated_filename = spat::shorten(pathbuf);
@@ -172,9 +186,9 @@ fn send_files(
                     tx.send(fdata);
                 } else {
                     for d in freader.iter_chunks(8192) {
-                        bar.set_position(pos - offset);
                         let data = d.unwrap();
                         pos += data.len() as u64;
+                        total_file_size_bar.inc(data.len().try_into().unwrap());
                         let fdata = if first {
                             first = false;
                             FileData {
@@ -293,7 +307,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(Box::new(MainError("no file(s) specified".to_string())));
     }
 
-    let mut deduped_filenames = HashSet::new();
+    let mut deduped_filenames: HashSet<String> = HashSet::new();
 
     // 1: dedup files
     for f in &args.files {
