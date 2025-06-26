@@ -94,8 +94,6 @@ fn send_files(
 ) -> Result<(), SendFileError> {
     let rt = Runtime::new()?;
 
-    let num_files_to_send = files.len();
-
     let resp: Result<Response<SendFileDataResponse>, SendFileError> = rt.block_on(async {
         let mut client = RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await?;
 
@@ -104,18 +102,7 @@ fn send_files(
                 .with_style(ProgressStyle::with_template("sending {msg}...").unwrap()),
         );
 
-        // let total_files_bar = multibar.add(
-        //     ProgressBar::new(num_files_to_send.try_into().unwrap()).with_style(
-        //         ProgressStyle::with_template("[{elapsed_precise}] {wide_bar} {pos:>7}/{len:7}")
-        //             .unwrap(),
-        //     ),
-        // );
-        // total_files_bar.enable_steady_tick(Duration::from_millis(100)); // 10 times per second
-        // total_files_bar.set_position(0);
-
         let (tx, rx) = mpsc::sync_channel::<FileData>(1);
-
-        let mut num_files_sent = 0;
 
         let total_file_size = files
             .iter()
@@ -145,7 +132,6 @@ fn send_files(
 
         tokio::spawn(async move {
             for file in files {
-                // total_files_bar.inc(1);
                 let file_size = File::open(&file.filename)
                     .map_err(|source| SendFileError::OpenError { source })
                     .unwrap()
@@ -210,7 +196,6 @@ fn send_files(
                         tx.send(fdata);
                     }
                 };
-                num_files_sent += 1;
             }
         });
 
@@ -498,7 +483,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // println!("{} files were sent", num_files_sent);
-
     // if num_send_errors > 0 {
     //     println!("couldn't send {} files due to errors", num_send_errors)
     // }
