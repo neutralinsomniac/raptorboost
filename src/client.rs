@@ -2,7 +2,6 @@ mod proto {
     tonic::include_proto!("raptorboost");
 }
 use crate::proto::SendFileDataResponse;
-use proto::SendFileDataStatus;
 use proto::raptor_boost_client::RaptorBoostClient;
 use proto::{AssignNamesRequest, FileData, FileStateResult, Sha256Filenames};
 
@@ -15,7 +14,6 @@ use std::io::{BufReader, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
 
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
