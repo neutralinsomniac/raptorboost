@@ -2,38 +2,54 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
     {
       nixpkgs,
       flake-utils,
+      crane,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        # Import nixpkgs for the specific system
         pkgs = import nixpkgs { inherit system; };
         lib = pkgs.lib;
+        craneLib = crane.mkLib pkgs;
+
+        src = lib.cleanSourceWith {
+          src = ./.;
+          filter =
+            path: type:
+            (lib.hasSuffix ".proto" path) || (craneLib.filterCargoSources path type);
+        };
+
+        commonArgs = {
+          inherit src;
+          strictDeps = true;
+
+          nativeBuildInputs = [ pkgs.protobuf ];
+          PROTOC = "${pkgs.protobuf}/bin/protoc";
+        };
+
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
       in
       {
-        packages.default = pkgs.rustPlatform.buildRustPackage {
-          name = "raptorboost";
+        packages.default = craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
 
-          PROTOC = "${pkgs.protobuf}/bin/protoc";
-
-          src = lib.cleanSource ./.;
-
-          cargoLock.lockFile = ./Cargo.lock;
-
-          meta = {
-            description = "A remote file/directory transfer tool with a simple interface";
-            homepage = "https://github.com/neutralinsomniac/raptorboost";
-            license = lib.licenses.mit;
-            maintainers = [ ];
-          };
-        };
+            meta = {
+              description = "A remote file/directory transfer tool with a simple interface";
+              homepage = "https://github.com/neutralinsomniac/raptorboost";
+              license = lib.licenses.mit;
+              maintainers = [ ];
+            };
+          }
+        );
       }
     );
 }
