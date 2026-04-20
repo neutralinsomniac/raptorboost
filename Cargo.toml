@@ -13,10 +13,10 @@ path = "src/client.rs"
 
 [dependencies]
 tonic = "*"
-tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "sync"] }
 prost = "0.13.5"
 clap = { version = "4.5.39", features = ["derive", "string"] }
-tokio-stream = "0.1.17"
+tokio-stream = { version = "0.1.17", features = ["sync"] }
 thiserror = "2.0.12"
 ring = "0.17.14"
 hex = "0.4.3"

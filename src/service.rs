@@ -2,21 +2,24 @@ use std::collections::HashSet;
 use std::fs::{create_dir, create_dir_all, remove_dir_all};
 use std::os::unix::fs::symlink;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::controller::{self, RaptorBoostError, RaptorBoostTransfer};
 use crate::proto::raptor_boost_server::RaptorBoost;
 use crate::proto::{
     AssignNamesRequest, AssignNamesResponse, FileData, FileState, FileStateResult,
     GetVersionRequest, GetVersionResponse, SendFileDataResponse, SendFileDataStatus,
-    UploadFilesRequest, UploadFilesResponse,
+    Sha256Filenames, UploadFilesRequest, UploadFilesResponse,
 };
 
 use chrono::Local;
 use safe_path::{scoped_join, scoped_resolve};
+use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 pub struct RaptorBoostService {
-    pub controller: controller::RaptorBoostController,
+    pub controller: Arc<controller::RaptorBoostController>,
 }
 
 #[tonic::async_trait]
@@ -30,59 +33,59 @@ impl RaptorBoost for RaptorBoostService {
         }))
     }
 
+    type UploadFilesStream =
+        Pin<Box<dyn Stream<Item = Result<UploadFilesResponse, Status>> + Send + 'static>>;
+
     async fn upload_files(
         &self,
-        request: Request<UploadFilesRequest>,
-    ) -> Result<Response<UploadFilesResponse>, Status> {
-        let mut seen_sha256es = HashSet::new();
+        request: Request<Streaming<UploadFilesRequest>>,
+    ) -> Result<Response<Self::UploadFilesStream>, Status> {
+        let stream = request.into_inner();
+        let controller = self.controller.clone();
+        let mut seen: HashSet<String> = HashSet::new();
 
-        let file_states: Result<Vec<FileState>, _> = request
-            .into_inner()
-            .sha256sums
-            .iter()
-            .filter_map(|sha256sum| {
-                // we've already handled this result; filter it out from our results
-                if seen_sha256es.contains(sha256sum) {
-                    return None;
+        let out = stream.map(move |req_result| -> Result<UploadFilesResponse, Status> {
+            let req = req_result?;
+            let mut states = Vec::with_capacity(req.sha256sums.len());
+
+            for sha256sum in req.sha256sums {
+                if !seen.insert(sha256sum.clone()) {
+                    continue;
                 }
-
-                seen_sha256es.insert(sha256sum.to_owned());
-
-                let check_file_result = match self.controller.check_file(sha256sum) {
-                    Ok(r) => r,
-                    Err(e) => match e {
-                        RaptorBoostError::PathSanitization(e) => {
-                            return Some(Err(Status::invalid_argument(e.to_string())));
-                        }
-                        RaptorBoostError::OtherError(e) => return Some(Err(Status::internal(e))),
-                        RaptorBoostError::LockFailure => {
-                            return Some(Err(Status::unavailable("couldn't lock!")));
-                        }
-                        _ => todo!("sort out these extra errors"),
-                    },
-                };
-
-                match check_file_result {
-                    controller::CheckFileResult::FileComplete => Some(Ok(FileState {
-                        sha256sum: sha256sum.to_owned(),
+                match controller.check_file(&sha256sum) {
+                    Ok(controller::CheckFileResult::FileComplete) => states.push(FileState {
+                        sha256sum,
                         state: FileStateResult::FilestateresultComplete.into(),
                         offset: None,
-                    })),
-                    controller::CheckFileResult::FilePartialOffset(offset) => Some(Ok(FileState {
-                        sha256sum: sha256sum.to_owned(),
-                        state: FileStateResult::FilestateresultNeedMoreData.into(),
-                        offset: Some(offset),
-                    })),
+                    }),
+                    Ok(controller::CheckFileResult::FilePartialOffset(offset)) => {
+                        states.push(FileState {
+                            sha256sum,
+                            state: FileStateResult::FilestateresultNeedMoreData.into(),
+                            offset: Some(offset),
+                        })
+                    }
+                    Err(e) => {
+                        return Err(match e {
+                            RaptorBoostError::PathSanitization(msg) => {
+                                Status::invalid_argument(msg)
+                            }
+                            RaptorBoostError::OtherError(msg) => Status::internal(msg),
+                            RaptorBoostError::LockFailure => {
+                                Status::unavailable("couldn't lock!")
+                            }
+                            _ => Status::internal("unexpected error"),
+                        });
+                    }
                 }
-            })
-            .collect();
+            }
 
-        match file_states {
-            Ok(states) => Ok(Response::new(UploadFilesResponse {
+            Ok(UploadFilesResponse {
                 file_states: states,
-            })),
-            Err(e) => Err(Status::internal(e.to_string())),
-        }
+            })
+        });
+
+        Ok(Response::new(Box::pin(out)))
     }
 
     async fn send_file_data(
@@ -140,69 +143,76 @@ impl RaptorBoost for RaptorBoostService {
 
     async fn assign_names(
         &self,
-        request: Request<AssignNamesRequest>,
+        request: Request<Streaming<AssignNamesRequest>>,
     ) -> Result<Response<AssignNamesResponse>, Status> {
-        // convenience
         let now = Local::now();
+        let mut stream = request.into_inner();
 
-        let assign_name_request = request.into_inner();
+        let mut header_name: Option<String> = None;
+        let mut header_force: bool = false;
+        let mut all_sha256_to_filenames: Vec<Sha256Filenames> = Vec::new();
+        let mut first = true;
+
+        while let Some(msg) = stream.message().await? {
+            if first {
+                header_name = msg.name;
+                header_force = msg.force.unwrap_or(false);
+                first = false;
+            }
+            all_sha256_to_filenames.extend(msg.sha256_to_filenames);
+        }
 
         let transfer_dir = scoped_join(
             self.controller.get_transfers_dir(),
-            match assign_name_request.name {
+            match header_name {
                 None => format!("{}", now.format("%Y-%m-%d_%H:%M:%S")),
-                Some(ref name) => name.to_string(),
+                Some(ref name) => name.clone(),
             },
         )?;
 
-        if assign_name_request.force() {
+        if header_force {
             let _ = remove_dir_all(&transfer_dir);
         }
 
-        match create_dir(&transfer_dir) {
-            Ok(_) => (),
-            Err(e) => {
-                return Err(Status::invalid_argument(format!(
-                    "couldn't create transfer directory: {}",
-                    e
-                )));
-            }
+        if let Err(e) = create_dir(&transfer_dir) {
+            return Err(Status::invalid_argument(format!(
+                "couldn't create transfer directory: {}",
+                e
+            )));
         }
 
         let complete_dir = self.controller.get_complete_dir();
 
-        for sha256tonames in assign_name_request.sha256_to_filenames {
+        for sha256tonames in all_sha256_to_filenames {
             for name in sha256tonames.names {
                 let mut path = Path::new(&name);
 
-                // strip leading "/"
                 if path.has_root() {
                     path = path.strip_prefix("/").unwrap();
                 }
 
-                // strip leading ..'s
                 while path.starts_with("..") {
                     path = path.strip_prefix("..").unwrap();
                 }
 
-                // split into path + directory component
                 let dir = path.parent().unwrap();
                 let file = path.file_name().unwrap();
 
                 let _ =
-                    create_dir_all(&transfer_dir.join(scoped_resolve(&transfer_dir, dir).unwrap()));
+                    create_dir_all(transfer_dir.join(scoped_resolve(&transfer_dir, dir).unwrap()));
 
-                let safe_target_sha256sum = &complete_dir
-                    .join(scoped_resolve(&complete_dir, &sha256tonames.sha256sum).unwrap());
+                let safe_target_sha256sum = complete_dir
+                    .join(scoped_resolve(complete_dir, &sha256tonames.sha256sum).unwrap());
 
                 let safe_target_link_dir =
-                    &transfer_dir.join(scoped_resolve(&transfer_dir, dir).unwrap());
+                    transfer_dir.join(scoped_resolve(&transfer_dir, dir).unwrap());
                 let safe_target_link =
-                    &safe_target_link_dir.join(scoped_resolve(safe_target_link_dir, file).unwrap());
+                    safe_target_link_dir.join(scoped_resolve(&safe_target_link_dir, file).unwrap());
 
                 symlink(safe_target_sha256sum, safe_target_link).unwrap();
             }
         }
+
         Ok(Response::new(AssignNamesResponse { statuses: vec![] }))
     }
 }

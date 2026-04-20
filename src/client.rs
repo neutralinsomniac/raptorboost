@@ -5,7 +5,7 @@ use crate::proto::SendFileDataResponse;
 use proto::raptor_boost_client::RaptorBoostClient;
 use proto::{AssignNamesRequest, FileData, FileStateResult, Sha256Filenames};
 
-use crate::proto::{FileState, UploadFilesRequest};
+use crate::proto::UploadFilesRequest;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -17,8 +17,9 @@ use std::str::FromStr;
 
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::sync::mpsc;
 use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response};
 use walkdir::WalkDir;
 
@@ -82,30 +83,18 @@ enum SendFileError {
 }
 
 async fn send_files(
-    host: &str,
-    port: u16,
+    mut client: RaptorBoostClient<tonic::transport::Channel>,
     files: Vec<FilenameWithState>,
+    total_bytes: u64,
     force_unlock: bool,
     multibar: MultiProgress,
 ) -> Result<(), SendFileError> {
-    let mut client = RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await?;
-
     let filename_bar = multibar.add(
         ProgressBar::new(0).with_style(ProgressStyle::with_template("sending {msg}...").unwrap()),
     );
 
-    let (tx, rx) = mpsc::sync_channel::<FileData>(1);
-
-    let mut total_file_size: u64 = 0;
-    for f in &files {
-        let len = std::fs::metadata(&f.filename)
-            .map_err(|source| SendFileError::OpenError { source })?
-            .len();
-        total_file_size += len - f.offset;
-    }
-
     let total_file_size_bar = multibar.add(
-        ProgressBar::new(total_file_size).with_style(
+        ProgressBar::new(total_bytes).with_style(
             ProgressStyle::with_template(
                 "[{elapsed_precise}] \
                  [eta: {eta_precise}] \
@@ -117,12 +106,17 @@ async fn send_files(
         ),
     );
 
-    let send_task: tokio::task::JoinHandle<Result<(), SendFileError>> =
-        tokio::spawn(async move {
+    let (tx, rx) = mpsc::channel::<FileData>(1);
+
+    let send_task: tokio::task::JoinHandle<Result<(), SendFileError>> = tokio::spawn({
+        let total_file_size_bar = total_file_size_bar.clone();
+        async move {
             for file in files {
                 let file_size = std::fs::metadata(&file.filename)
                     .map_err(|source| SendFileError::OpenError { source })?
                     .len();
+
+                let remaining = file_size.saturating_sub(file.offset);
 
                 let mut f = File::open(&file.filename)
                     .map_err(|source| SendFileError::OpenError { source })?;
@@ -131,14 +125,13 @@ async fn send_files(
 
                 let freader = BufReader::new(f);
 
-                let truncated_filename =
-                    spat::shorten(PathBuf::from_str(&file.filename).unwrap())
-                        .display()
-                        .to_string();
+                let truncated_filename = spat::shorten(PathBuf::from_str(&file.filename).unwrap())
+                    .display()
+                    .to_string();
                 filename_bar.set_message(truncated_filename);
 
                 // empty file (or partial with 0 bytes left): send a single empty frame
-                if file_size - file.offset == 0 {
+                if remaining == 0 {
                     let fdata = FileData {
                         first: true,
                         last: true,
@@ -146,7 +139,7 @@ async fn send_files(
                         force: Some(force_unlock),
                         data: vec![],
                     };
-                    if tx.send(fdata).is_err() {
+                    if tx.send(fdata).await.is_err() {
                         return Ok(());
                     }
                     continue;
@@ -177,15 +170,16 @@ async fn send_files(
                             data,
                         }
                     };
-                    if tx.send(fdata).is_err() {
+                    if tx.send(fdata).await.is_err() {
                         return Ok(());
                     }
                 }
             }
             Ok(())
-        });
+        }
+    });
 
-    let request = Request::new(tokio_stream::iter(rx));
+    let request = Request::new(ReceiverStream::new(rx));
     let resp: Result<Response<SendFileDataResponse>, tonic::Status> =
         client.send_file_data(request).await;
 
@@ -213,23 +207,6 @@ async fn send_files(
             Err(SendFileError::ChecksumMismatch)
         }
     }
-}
-
-async fn get_file_states(
-    host: &str,
-    port: u16,
-    sha256sums: Vec<String>,
-) -> Result<Vec<FileState>, Box<dyn std::error::Error>> {
-    let mut client = RaptorBoostClient::connect(format!("http://{}:{}", host, port))
-        .await
-        .map_err(|e| format!("error connecting: {}", e))?;
-
-    let upload_file_resp = client
-        .upload_files(Request::new(UploadFilesRequest { sha256sums }))
-        .await
-        .map_err(|e| format!("error uploading file list: {}", e))?;
-
-    Ok(upload_file_resp.into_inner().file_states)
 }
 
 #[derive(Error, Debug)]
@@ -301,9 +278,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 3: calculate checksums
-    let mut filename_to_sha256es = HashMap::new();
-    let mut sha256_to_filenames: HashMap<String, Vec<&String>> = HashMap::new();
-    let mut sorted_sha256es = Vec::new();
+    let mut filename_to_sha256es: HashMap<String, String> = HashMap::new();
+    let mut sha256_to_filenames: HashMap<String, Vec<String>> = HashMap::new();
+    let mut sorted_sha256es: Vec<String> = Vec::new();
     println!("[+] calculating checksums...");
     let multibar = MultiProgress::new();
     let bar = multibar.add(ProgressBar::new(sorted_files.len().try_into().unwrap()));
@@ -330,83 +307,109 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let sha256sum = hex::encode(hasher.finish());
-        filename_to_sha256es.insert(sha256sum.clone(), filename);
+        filename_to_sha256es.insert(sha256sum.clone(), filename.clone());
         sorted_sha256es.push(sha256sum.clone());
         sha256_to_filenames
             .entry(sha256sum)
             .or_default()
-            .push(filename);
+            .push(filename.clone());
         bar.inc(1);
     }
 
     drop(bar);
 
-    println!("[+] getting file states from remote...");
-    // 4: get file states through grpc
-    let file_states = get_file_states(&args.host, args.port, sorted_sha256es)
+    // 4: check what the server needs, then stream those files.
+    let client = RaptorBoostClient::connect(format!("http://{}:{}", args.host, args.port))
         .await
-        .map_err(|e| MainError(format!("error getting file states: {}", e)))?;
+        .map_err(|e| MainError(format!("error connecting: {}", e)))?;
 
-    let mut num_files_up_to_date = 0;
-    let mut num_files_to_send = 0;
-    for file_state in &file_states {
-        match file_state.state() {
-            FileStateResult::FilestateresultUnspecified => eprintln!("wut"),
-            FileStateResult::FilestateresultNeedMoreData => num_files_to_send += 1,
-            FileStateResult::FilestateresultComplete => num_files_up_to_date += 1,
-        }
-    }
+    println!("[+] checking remote state...");
 
-    // ok, we have our filename<->hash mapping and our hash<->filestate mapping, combine them
-    let filenames_with_state: Vec<FilenameWithState> = file_states
-        .iter()
-        .filter_map(|file_state| {
-            if file_state.state() == FileStateResult::FilestateresultComplete {
-                None
-            } else {
-                Some(FilenameWithState {
-                    filename: filename_to_sha256es
-                        .get(&file_state.sha256sum)
-                        .unwrap()
-                        .to_string(),
-                    sha256sum: file_state.sha256sum.to_owned(),
-                    offset: file_state.offset(),
-                })
-            }
+    const BATCH: usize = 1000;
+    let check_requests: Vec<UploadFilesRequest> = sorted_sha256es
+        .chunks(BATCH)
+        .map(|c| UploadFilesRequest {
+            sha256sums: c.to_vec(),
         })
         .collect();
 
-    // 5: upload actual file data
-    if num_files_to_send > 0 {
-        println!("[+] sending {} files...", num_files_to_send);
+    let response = client
+        .clone()
+        .upload_files(Request::new(tokio_stream::iter(check_requests)))
+        .await
+        .map_err(|e| MainError(format!("check stream error: {}", e)))?;
+    let mut stream = response.into_inner();
+
+    let mut to_send: Vec<FilenameWithState> = Vec::new();
+    let mut total_to_send: u64 = 0;
+    let mut num_files_up_to_date: u64 = 0;
+
+    while let Some(batch) = stream
+        .message()
+        .await
+        .map_err(|e| MainError(format!("check stream error: {}", e)))?
+    {
+        for fs in batch.file_states {
+            match fs.state() {
+                FileStateResult::FilestateresultUnspecified => eprintln!("wut"),
+                FileStateResult::FilestateresultNeedMoreData => {
+                    let offset = fs.offset();
+                    let filename = filename_to_sha256es
+                        .get(&fs.sha256sum)
+                        .cloned()
+                        .unwrap_or_default();
+                    let file_size = std::fs::metadata(&filename).map(|m| m.len()).unwrap_or(0);
+                    total_to_send += file_size.saturating_sub(offset);
+                    to_send.push(FilenameWithState {
+                        filename,
+                        sha256sum: fs.sha256sum,
+                        offset,
+                    });
+                }
+                FileStateResult::FilestateresultComplete => num_files_up_to_date += 1,
+            }
+        }
     }
 
-    send_files(
-        &args.host,
-        args.port,
-        filenames_with_state,
-        args.force_unlock,
-        multibar,
-    )
-    .await?;
+    let num_files_transferred = to_send.len();
+    if !to_send.is_empty() {
+        println!("[+] streaming files...");
+        send_files(
+            client.clone(),
+            to_send,
+            total_to_send,
+            args.force_unlock,
+            multibar.clone(),
+        )
+        .await?;
+    }
 
-    // 6: send names
+    // 5: send names
     println!("[+] updating filenames...");
-    let mut client =
-        RaptorBoostClient::connect(format!("http://{}:{}", args.host, args.port)).await?;
+    let mut client = client;
+
+    const ASSIGN_BATCH: usize = 200;
+    let owned: Vec<Sha256Filenames> = sha256_to_filenames
+        .into_iter()
+        .map(|(sha256sum, names)| Sha256Filenames { sha256sum, names })
+        .collect();
+
+    let mut messages: Vec<AssignNamesRequest> = Vec::with_capacity(owned.len() / ASSIGN_BATCH + 1);
+    messages.push(AssignNamesRequest {
+        name: args.name,
+        force: args.force_name.then_some(true),
+        sha256_to_filenames: vec![],
+    });
+    for chunk in owned.chunks(ASSIGN_BATCH) {
+        messages.push(AssignNamesRequest {
+            name: None,
+            force: None,
+            sha256_to_filenames: chunk.to_vec(),
+        });
+    }
 
     let assign_names_resp = client
-        .assign_names(Request::new(AssignNamesRequest {
-            sha256_to_filenames: sha256_to_filenames
-                .iter()
-                .map(|(sha256sum, filenames)| Sha256Filenames {
-                    sha256sum: sha256sum.to_string(),
-                    names: filenames.iter().map(|&name| name.to_string()).collect(),
-                })
-                .collect(),
-            name: args.name,
-            force: args.force_name.then_some(true),
-        }))
+        .assign_names(Request::new(tokio_stream::iter(messages)))
         .await;
 
     if let Err(e) = assign_names_resp {
@@ -415,6 +418,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
 
+    if num_files_transferred != 0 {
+        println!("{} files transferred", num_files_transferred);
+    }
     if num_files_up_to_date != 0 {
         println!("{} files were already up to date", num_files_up_to_date);
     }

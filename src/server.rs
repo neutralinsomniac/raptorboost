@@ -8,6 +8,7 @@ mod service;
 
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::{net::SocketAddr, process::ExitCode};
 
 use clap::{ArgAction, Parser};
@@ -42,7 +43,9 @@ async fn main() -> ExitCode {
         }
     };
 
-    let rb_service = service::RaptorBoostService { controller };
+    let rb_service = service::RaptorBoostService {
+        controller: Arc::new(controller),
+    };
 
     let mut host = args.host;
 

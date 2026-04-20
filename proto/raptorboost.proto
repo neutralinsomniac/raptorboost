@@ -3,9 +3,9 @@ package raptorboost;
 
 service RaptorBoost {
   rpc GetVersion (GetVersionRequest) returns (GetVersionResponse);
-  rpc UploadFiles (UploadFilesRequest) returns (UploadFilesResponse);
+  rpc UploadFiles (stream UploadFilesRequest) returns (stream UploadFilesResponse);
   rpc SendFileData (stream FileData) returns (SendFileDataResponse);
-  rpc AssignNames (AssignNamesRequest) returns (AssignNamesResponse);
+  rpc AssignNames (stream AssignNamesRequest) returns (AssignNamesResponse);
 }
 
 message GetVersionRequest {}
@@ -57,6 +57,9 @@ message Sha256Filenames {
   repeated string names = 2;
 }
 
+// On the AssignNames stream: `name` and `force` are read only from the first
+// message; `sha256_to_filenames` may appear in any message and is accumulated
+// across the stream.
 message AssignNamesRequest {
   optional string name = 1;
   optional bool force = 2;
