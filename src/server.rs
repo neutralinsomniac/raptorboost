@@ -77,11 +77,7 @@ async fn main() -> ExitCode {
         }
     };
 
-    println!(
-        "listening on {}:{}",
-        bind_addr.ip().to_string(),
-        bind_addr.port()
-    );
+    println!("listening on {}:{}", bind_addr.ip(), bind_addr.port());
 
     match Server::builder()
         .max_concurrent_streams(100)

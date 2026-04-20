@@ -48,7 +48,7 @@ impl RaptorBoost for RaptorBoostService {
 
                 seen_sha256es.insert(sha256sum.to_owned());
 
-                let check_file_result = match self.controller.check_file(&sha256sum) {
+                let check_file_result = match self.controller.check_file(sha256sum) {
                     Ok(r) => r,
                     Err(e) => match e {
                         RaptorBoostError::PathSanitization(e) => {
@@ -90,83 +90,52 @@ impl RaptorBoost for RaptorBoostService {
         request: Request<Streaming<FileData>>,
     ) -> Result<Response<SendFileDataResponse>, Status> {
         let mut stream = request.into_inner();
+        let mut current: Option<RaptorBoostTransfer> = None;
 
-        let mut transfer_object: RaptorBoostTransfer;
-
-        'next_file: loop {
-            let Some(file_data) = stream.message().await? else {
-                return Ok(Response::new(SendFileDataResponse {
-                    status: SendFileDataStatus::SendfiledatastatusComplete.into(),
-                }));
-            };
-
+        while let Some(file_data) = stream.message().await? {
             if file_data.first {
-                // verify sha256sum exists
-                let Some(sha256sum) = file_data.sha256sum else {
+                if current.is_some() {
                     return Err(Status::invalid_argument(
-                        "need sha256sum in first data packet",
+                        "unexpected 'first' packet before prior transfer completed",
                     ));
-                };
-
-                let force = match file_data.force {
-                    Some(t) => t,
-                    None => false,
-                };
-
-                transfer_object = match self.controller.start_transfer(&sha256sum, force) {
-                    Ok(t) => t,
-                    Err(e) => match e {
-                        RaptorBoostError::LockFailure => {
-                            return Err(Status::unavailable("couldn't lock!"));
-                        }
-                        RaptorBoostError::PathSanitization(e) => {
-                            return Err(Status::invalid_argument(e.to_string()));
-                        }
-                        RaptorBoostError::OtherError(e) => return Err(Status::internal(e)),
-                        RaptorBoostError::TransferAlreadyComplete => {
-                            return Err(Status::already_exists("already exists"));
-                        }
-                        _ => return Err(Status::internal("unexpected error occurred")),
-                    },
                 }
-            } else {
-                return Err(Status::invalid_argument("first packet not marked as first"));
+
+                let sha256sum = file_data.sha256sum.as_deref().ok_or_else(|| {
+                    Status::invalid_argument("need sha256sum in first data packet")
+                })?;
+                let force = file_data.force.unwrap_or(false);
+
+                current = Some(self.controller.start_transfer(sha256sum, force).map_err(
+                    |e| match e {
+                        RaptorBoostError::LockFailure => Status::unavailable("couldn't lock!"),
+                        RaptorBoostError::PathSanitization(msg) => Status::invalid_argument(msg),
+                        RaptorBoostError::OtherError(msg) => Status::internal(msg),
+                        RaptorBoostError::TransferAlreadyComplete => {
+                            Status::already_exists("already exists")
+                        }
+                        _ => Status::internal("unexpected error occurred"),
+                    },
+                )?);
             }
 
-            // write this first file chunk
-            let total = file_data.data.len();
-            let mut num_written = 0;
+            let transfer = current
+                .as_mut()
+                .ok_or_else(|| Status::invalid_argument("first packet not marked as first"))?;
 
-            while num_written < total {
-                num_written += transfer_object.write(&file_data.data[num_written..])?;
-            }
+            transfer.write_all(&file_data.data)?;
 
             if file_data.last {
-                match transfer_object.complete() {
-                    Ok(_) => (),
-                    Err(e) => println!("error: {}", e.to_string()),
-                }
-                continue;
-            }
-
-            // now loop over remaining message stream
-            while let Some(file_data) = stream.message().await? {
-                let total = file_data.data.len();
-                let mut num_written = 0;
-
-                while num_written < total {
-                    num_written += transfer_object.write(&file_data.data[num_written..])?;
-                }
-
-                if file_data.last {
-                    match transfer_object.complete() {
-                        Ok(_) => (),
-                        Err(e) => println!("error: {}", e.to_string()),
-                    }
-                    continue 'next_file;
-                }
+                current
+                    .take()
+                    .unwrap()
+                    .complete()
+                    .map_err(|e| Status::internal(format!("complete failed: {}", e)))?;
             }
         }
+
+        Ok(Response::new(SendFileDataResponse {
+            status: SendFileDataStatus::SendfiledatastatusComplete.into(),
+        }))
     }
 
     async fn assign_names(

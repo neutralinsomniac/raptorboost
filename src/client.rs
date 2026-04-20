@@ -17,11 +17,8 @@ use std::str::FromStr;
 
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use ring;
-use spat;
 use std::sync::mpsc;
 use thiserror::Error;
-use tokio::runtime::Runtime;
 use tonic::{Request, Response};
 use walkdir::WalkDir;
 
@@ -36,8 +33,8 @@ impl<R: Read> Iterator for ToChunks<R> {
     fn next(&mut self) -> Option<Self::Item> {
         let mut buffer = vec![0u8; self.chunk_size];
         match self.reader.read(&mut buffer) {
-            Ok(0) => return None,
-            Ok(n) => return Some(Ok(buffer[..n].to_vec())),
+            Ok(0) => None,
+            Ok(n) => Some(Ok(buffer[..n].to_vec())),
             Err(e) => Some(Err(e)),
         }
     }
@@ -83,39 +80,32 @@ enum SendFileError {
     #[error("unspecified error")]
     UnspecifiedError,
 }
-fn send_files(
+
+async fn send_files(
     host: &str,
     port: u16,
     files: Vec<FilenameWithState>,
     force_unlock: bool,
     multibar: MultiProgress,
 ) -> Result<(), SendFileError> {
-    let rt = Runtime::new()?;
+    let mut client = RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await?;
 
-    let resp: Result<Response<SendFileDataResponse>, SendFileError> = rt.block_on(async {
-        let mut client = RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await?;
+    let filename_bar = multibar.add(
+        ProgressBar::new(0).with_style(ProgressStyle::with_template("sending {msg}...").unwrap()),
+    );
 
-        let filename_bar = multibar.add(
-            ProgressBar::new(0)
-                .with_style(ProgressStyle::with_template("sending {msg}...").unwrap()),
-        );
+    let (tx, rx) = mpsc::sync_channel::<FileData>(1);
 
-        let (tx, rx) = mpsc::sync_channel::<FileData>(1);
+    let mut total_file_size: u64 = 0;
+    for f in &files {
+        let len = std::fs::metadata(&f.filename)
+            .map_err(|source| SendFileError::OpenError { source })?
+            .len();
+        total_file_size += len - f.offset;
+    }
 
-        let total_file_size = files
-            .iter()
-            .map(|f| {
-                File::open(&f.filename)
-                    .map_err(|source| SendFileError::OpenError { source })
-                    .unwrap()
-                    .metadata()
-                    .unwrap()
-                    .len()
-                    - f.offset
-            })
-            .sum();
-
-        let bar = ProgressBar::new(total_file_size).with_style(
+    let total_file_size_bar = multibar.add(
+        ProgressBar::new(total_file_size).with_style(
             ProgressStyle::with_template(
                 "[{elapsed_precise}] \
                  [eta: {eta_precise}] \
@@ -124,96 +114,95 @@ fn send_files(
                  [{decimal_bytes_per_sec}]",
             )
             .unwrap(),
-        );
+        ),
+    );
 
-        let total_file_size_bar = multibar.add(bar);
-
+    let send_task: tokio::task::JoinHandle<Result<(), SendFileError>> =
         tokio::spawn(async move {
             for file in files {
-                let file_size = File::open(&file.filename)
-                    .map_err(|source| SendFileError::OpenError { source })
-                    .unwrap()
-                    .metadata()
-                    .unwrap()
+                let file_size = std::fs::metadata(&file.filename)
+                    .map_err(|source| SendFileError::OpenError { source })?
                     .len();
 
-                let filename = file.filename.to_owned();
-                let offset = file.offset;
-                let sha256sum = file.sha256sum.to_owned();
+                let mut f = File::open(&file.filename)
+                    .map_err(|source| SendFileError::OpenError { source })?;
+                f.seek(SeekFrom::Start(file.offset))
+                    .map_err(|source| SendFileError::SeekError { source })?;
 
-                let mut f = File::open(&filename).unwrap();
-                f.seek(SeekFrom::Start(offset))
-                    .map_err(|source| SendFileError::SeekError { source })
-                    .unwrap();
-
-                let mut first = true;
                 let freader = BufReader::new(f);
 
-                let mut pos: u64 = offset;
-
-                let pathbuf = PathBuf::from_str(&file.filename).unwrap();
-                let truncated_filename = spat::shorten(pathbuf);
-                let truncated_filename = truncated_filename.display().to_string();
+                let truncated_filename =
+                    spat::shorten(PathBuf::from_str(&file.filename).unwrap())
+                        .display()
+                        .to_string();
                 filename_bar.set_message(truncated_filename);
 
-                // we branch here to handle the case where a file iterator on an empty file (or a partial file with 0 bytes left to transfer) wouldn't iterate
-                if file_size - offset == 0 {
-                    // stream expects an iterable, so we create one here to hold the single file data object we're about to send
+                // empty file (or partial with 0 bytes left): send a single empty frame
+                if file_size - file.offset == 0 {
                     let fdata = FileData {
                         first: true,
                         last: true,
-                        sha256sum: Some(sha256sum),
+                        sha256sum: Some(file.sha256sum),
                         force: Some(force_unlock),
                         data: vec![],
                     };
-
-                    tx.send(fdata);
-                } else {
-                    for d in freader.iter_chunks(8192) {
-                        let data = d.unwrap();
-                        pos += data.len() as u64;
-                        total_file_size_bar.inc(data.len().try_into().unwrap());
-                        let fdata = if first {
-                            first = false;
-                            FileData {
-                                first: true,
-                                last: file_size == pos,
-                                sha256sum: Some(sha256sum.clone()),
-                                force: Some(force_unlock),
-                                data,
-                            }
-                        } else {
-                            FileData {
-                                first: false,
-                                last: file_size == pos,
-                                sha256sum: None,
-                                force: None,
-                                data,
-                            }
-                        };
-                        tx.send(fdata);
+                    if tx.send(fdata).is_err() {
+                        return Ok(());
                     }
-                };
+                    continue;
+                }
+
+                let mut first = true;
+                let mut pos: u64 = file.offset;
+
+                for d in freader.iter_chunks(8192) {
+                    let data = d?;
+                    pos += data.len() as u64;
+                    total_file_size_bar.inc(data.len() as u64);
+                    let fdata = if first {
+                        first = false;
+                        FileData {
+                            first: true,
+                            last: file_size == pos,
+                            sha256sum: Some(file.sha256sum.clone()),
+                            force: Some(force_unlock),
+                            data,
+                        }
+                    } else {
+                        FileData {
+                            first: false,
+                            last: file_size == pos,
+                            sha256sum: None,
+                            force: None,
+                            data,
+                        }
+                    };
+                    if tx.send(fdata).is_err() {
+                        return Ok(());
+                    }
+                }
             }
+            Ok(())
         });
 
-        let request = Request::new(tokio_stream::iter(rx));
+    let request = Request::new(tokio_stream::iter(rx));
+    let resp: Result<Response<SendFileDataResponse>, tonic::Status> =
+        client.send_file_data(request).await;
 
-        let resp = client.send_file_data(request).await;
+    // surface any producer-side error
+    if let Ok(Err(e)) = send_task.await {
+        return Err(e);
+    }
 
-        match resp {
-            Err(e) => {
-                // grpc error
-                println!("err: {}", e.to_string());
-                return Err(SendFileError::UnspecifiedError);
-            }
-            Ok(r) => return Ok(r),
+    let resp = match resp {
+        Err(e) => {
+            eprintln!("err: {}", e);
+            return Err(SendFileError::UnspecifiedError);
         }
-    });
+        Ok(r) => r,
+    };
 
-    // errors here are specific to our proto
-    // TODO: make checksum error a grpc error?
-    match resp?.into_inner().status() {
+    match resp.into_inner().status() {
         proto::SendFileDataStatus::SendfiledatastatusUnspecified => {
             eprintln!("\runspecified error occurred");
             Err(SendFileError::UnspecifiedError)
@@ -226,39 +215,21 @@ fn send_files(
     }
 }
 
-fn get_file_states(
+async fn get_file_states(
     host: &str,
     port: u16,
     sha256sums: Vec<String>,
 ) -> Result<Vec<FileState>, Box<dyn std::error::Error>> {
-    let rt = Runtime::new()?;
-    rt.block_on(async {
-        let mut client = match RaptorBoostClient::connect(format!("http://{}:{}", host, port)).await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                return Err(Box::<dyn std::error::Error>::from(format!(
-                    "error connecting: {}",
-                    e
-                )));
-            }
-        };
+    let mut client = RaptorBoostClient::connect(format!("http://{}:{}", host, port))
+        .await
+        .map_err(|e| format!("error connecting: {}", e))?;
 
-        let upload_file_resp = match client
-            .upload_files(Request::new(UploadFilesRequest { sha256sums }))
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(Box::<dyn std::error::Error>::from(format!(
-                    "error uploading file list: {}",
-                    e
-                )));
-            }
-        };
+    let upload_file_resp = client
+        .upload_files(Request::new(UploadFilesRequest { sha256sums }))
+        .await
+        .map_err(|e| format!("error uploading file list: {}", e))?;
 
-        Ok(upload_file_resp.into_inner().file_states)
-    })
+    Ok(upload_file_resp.into_inner().file_states)
 }
 
 #[derive(Error, Debug)]
@@ -283,11 +254,13 @@ struct Args {
     #[arg(trailing_var_arg = true, index = 2)]
     files: Vec<String>,
 }
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    if args.files.len() == 0 {
-        return Err(Box::new(MainError("no file(s) specified".to_string())));
+    if args.files.is_empty() {
+        return Err(MainError("no file(s) specified".to_string()).into());
     }
 
     let mut deduped_filenames: HashSet<String> = HashSet::new();
@@ -296,7 +269,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for f in &args.files {
         let fd = match File::open(f) {
             Ok(fd) => fd,
-            Err(e) => return Err(Box::new(MainError(format!("couldn't open '{}': {}", f, e)))),
+            Err(e) => return Err(MainError(format!("couldn't open '{}': {}", f, e)).into()),
         };
         if fd.metadata()?.is_dir() {
             for entry in WalkDir::new(f)
@@ -304,16 +277,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .filter_map(Result::ok)
                 .filter(|e| !e.file_type().is_dir() && !e.file_type().is_symlink())
             {
-                let f_name = String::from(entry.path().to_string_lossy());
-                deduped_filenames.insert(f_name);
+                deduped_filenames.insert(entry.path().to_string_lossy().into_owned());
             }
         } else {
             deduped_filenames.insert(f.to_owned());
         }
     }
 
-    if deduped_filenames.len() == 0 {
-        return Err(Box::new(MainError("no files found".to_string())));
+    if deduped_filenames.is_empty() {
+        return Err(MainError("no files found".to_string()).into());
     }
 
     // 2: sort files
@@ -330,7 +302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3: calculate checksums
     let mut filename_to_sha256es = HashMap::new();
-    let mut sha256_to_filenames = HashMap::new();
+    let mut sha256_to_filenames: HashMap<String, Vec<&String>> = HashMap::new();
     let mut sorted_sha256es = Vec::new();
     println!("[+] calculating checksums...");
     let multibar = MultiProgress::new();
@@ -352,20 +324,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
-                    return Err(Box::new(MainError(format!(
-                        "error reading `{}`: {}",
-                        filename, e
-                    ))));
+                    return Err(MainError(format!("error reading `{}`: {}", filename, e)).into());
                 }
             }
         }
 
         let sha256sum = hex::encode(hasher.finish());
-        filename_to_sha256es.insert(sha256sum.to_owned(), filename);
+        filename_to_sha256es.insert(sha256sum.clone(), filename);
         sorted_sha256es.push(sha256sum.clone());
         sha256_to_filenames
             .entry(sha256sum)
-            .or_insert(vec![])
+            .or_default()
             .push(filename);
         bar.inc(1);
     }
@@ -374,15 +343,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("[+] getting file states from remote...");
     // 4: get file states through grpc
-    let file_states = match get_file_states(&args.host, args.port, sorted_sha256es) {
-        Ok(f) => f,
-        Err(e) => {
-            return Err(Box::new(MainError(format!(
-                "error getting file states: {}",
-                e
-            ))));
-        }
-    };
+    let file_states = get_file_states(&args.host, args.port, sorted_sha256es)
+        .await
+        .map_err(|e| MainError(format!("error getting file states: {}", e)))?;
 
     let mut num_files_up_to_date = 0;
     let mut num_files_to_send = 0;
@@ -397,7 +360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ok, we have our filename<->hash mapping and our hash<->filestate mapping, combine them
     let filenames_with_state: Vec<FilenameWithState> = file_states
         .iter()
-        .filter_map(move |file_state| {
+        .filter_map(|file_state| {
             if file_state.state() == FileStateResult::FilestateresultComplete {
                 None
             } else {
@@ -414,11 +377,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // 5: upload actual file data
-    // doing this so we don't have to collect() the above iterator
     if num_files_to_send > 0 {
         println!("[+] sending {} files...", num_files_to_send);
     }
-    // let mut num_send_errors = 0;
 
     send_files(
         &args.host,
@@ -426,64 +387,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         filenames_with_state,
         args.force_unlock,
         multibar,
-    )?;
+    )
+    .await?;
 
-    // 5: send names
+    // 6: send names
     println!("[+] updating filenames...");
-    let rt = Runtime::new()?;
-    let assign_names_resp = rt.block_on(async {
-        let mut client =
-            match RaptorBoostClient::connect(format!("http://{}:{}", args.host, args.port)).await {
-                Ok(c) => c,
-                Err(e) => {
-                    return Err(e.to_string());
-                }
-            };
+    let mut client =
+        RaptorBoostClient::connect(format!("http://{}:{}", args.host, args.port)).await?;
 
-        let _assign_names_request = match client
-            .assign_names(Request::new(AssignNamesRequest {
-                sha256_to_filenames: sha256_to_filenames
-                    .iter()
-                    .map(|(sha256sum, filenames)| -> Sha256Filenames {
-                        Sha256Filenames {
-                            sha256sum: sha256sum.to_string(),
-                            names: filenames.iter().map(|&name| name.to_string()).collect(),
-                        }
-                    })
-                    .collect(),
-                name: args.name,
-                force: match args.force_name {
-                    true => Some(true),
-                    false => None,
-                },
-            }))
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(e.message().to_string());
-            }
-        };
+    let assign_names_resp = client
+        .assign_names(Request::new(AssignNamesRequest {
+            sha256_to_filenames: sha256_to_filenames
+                .iter()
+                .map(|(sha256sum, filenames)| Sha256Filenames {
+                    sha256sum: sha256sum.to_string(),
+                    names: filenames.iter().map(|&name| name.to_string()).collect(),
+                })
+                .collect(),
+            name: args.name,
+            force: args.force_name.then_some(true),
+        }))
+        .await;
 
-        // println!("{}", assign_names_request.into_inner().statuses);
-        Ok(())
-    });
-
-    match assign_names_resp {
-        Ok(_) => (),
-        Err(e) => println!("remote error assigning names: {}", e),
+    if let Err(e) = assign_names_resp {
+        println!("remote error assigning names: {}", e.message());
     }
 
-    println!("");
+    println!();
 
     if num_files_up_to_date != 0 {
         println!("{} files were already up to date", num_files_up_to_date);
     }
-
-    // println!("{} files were sent", num_files_sent);
-    // if num_send_errors > 0 {
-    //     println!("couldn't send {} files due to errors", num_send_errors)
-    // }
 
     Ok(())
 }

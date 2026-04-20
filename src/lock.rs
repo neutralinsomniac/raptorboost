@@ -17,6 +17,12 @@ impl LockFile {
 
 impl Drop for LockFile {
     fn drop(&mut self) {
-        std::fs::remove_file(&self.path).unwrap();
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            eprintln!(
+                "warning: failed to remove lock file {}: {}",
+                self.path.display(),
+                e
+            );
+        }
     }
 }
